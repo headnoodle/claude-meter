@@ -453,6 +453,39 @@ def _styled(title: str, color: str = None, mono: bool = False) -> rumps.MenuItem
     return item
 
 
+def _rich_item(*segments) -> rumps.MenuItem:
+    """Multi-segment menu item. Each segment: (text, color=None, bold=False, mono=False).
+
+    Lets different parts of one line have different colours and weights —
+    e.g. a grey label alongside a bold, coloured value.
+    """
+    full_text = "".join(seg[0] for seg in segments)
+    item = rumps.MenuItem(full_text, callback=lambda _: None)
+    if not _HAS_APPKIT:
+        return item
+    ns_str = NSMutableAttributedString.alloc().initWithString_attributes_(full_text, {})
+    pos = 0
+    for seg in segments:
+        text  = seg[0]
+        color = seg[1] if len(seg) > 1 else None
+        bold  = seg[2] if len(seg) > 2 else False
+        mono  = seg[3] if len(seg) > 3 else False
+        n     = len(text)
+        rng   = (pos, n)
+        if color:
+            ns_str.addAttribute_value_range_(NSForegroundColorAttributeName, _ns_color(color), rng)
+        font = None
+        if mono:
+            font = NSFont.fontWithName_size_("Menlo-Bold" if bold else "Menlo", 12.0)
+        elif bold:
+            font = NSFont.boldSystemFontOfSize_(13.0)
+        if font:
+            ns_str.addAttribute_value_range_(NSFontAttributeName, font, rng)
+        pos += n
+    item._menuitem.setAttributedTitle_(ns_str)
+    return item
+
+
 def _sparkline_item(values: list, today_color: str) -> rumps.MenuItem:
     """Week sparkline with today's bar highlighted in today_color."""
     blocks = "▁▂▃▄▅▆▇█"
@@ -527,32 +560,61 @@ class ClaudeMeterApp(rumps.App):
         items = []
 
         # ── Today summary ────────────────────────────────────────────────
-        budget_str  = f"  (budget: {fmt(budget)})" if budget > 0 else ""
-        think_str   = f"  · ↯ {fmt(r['today_thinking'])} thinking" if r["today_thinking"] >= 0.01 else ""
-        today_color = C_RED if over_budget else None
-        items.append(_styled(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){think_str}{budget_str}", color=today_color))
+        today_val_c = C_RED if over_budget else "#f1f3f5"
+        think_segs  = [("  · ↯ ", C_ORANGE), (fmt(r["today_thinking"]), C_ORANGE, True), (" thinking", C_ORANGE)] \
+                      if r["today_thinking"] >= 0.01 else []
+        budget_segs = [("  (budget: ", C_DIM), (fmt(budget), C_DIM), (")", C_DIM)] \
+                      if budget > 0 else []
+        items.append(_rich_item(
+            ("Today: ", C_DIM),
+            (fmt(r["today_cost"]), today_val_c, True),
+            (f" ({r['today_reqs']} requests)", C_DIM),
+            *think_segs,
+            *budget_segs,
+        ))
 
         bar_color = C_DIM  # fallback if no budget
         if budget > 0:
             bar, pct_f = budget_bar(r["today_cost"], budget)
             bar_color  = C_RED if pct_f >= 0.85 else C_ORANGE if pct_f >= 0.6 else C_GREEN
-            items.append(_styled(f"{bar}  {pct_f*100:.0f}% of {fmt(budget)}", color=bar_color, mono=True))
+            items.append(_rich_item(
+                (bar, bar_color, False, True),
+                (f"  {pct_f*100:.0f}%", bar_color, True),
+                (" of ", C_DIM),
+                (fmt(budget), C_DIM),
+            ))
 
         burn_color = C_ORANGE if burn >= 0.01 else C_DIM
-        items.append(_styled(f"Burn rate: {fmt(burn)}/hr  (rolling 1h)", color=burn_color))
+        items.append(_rich_item(
+            ("Burn rate: ", C_DIM),
+            (f"{fmt(burn)}/hr", burn_color, True),
+            ("  (rolling 1h)", C_DIM),
+        ))
 
         if r["trend_pct"] is not None:
             pct         = r["trend_pct"]
             arrow       = "▲" if pct >= 0 else "▼"
             trend_color = C_RED if pct >= 0 else C_GREEN
-            items.append(_styled(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)", color=trend_color))
+            items.append(_rich_item(
+                ("Trend: ", C_DIM),
+                (f"{arrow} {abs(pct):.0f}%", trend_color, True),
+                (f" vs 7d avg (", C_DIM),
+                (fmt(r["avg_daily"]), C_DIM),
+                ("/day)", C_DIM),
+            ))
 
         cr_tok, ct_tok, c_saved = r["cache_today"]
         if ct_tok > 0:
             hit_rate    = cr_tok / ct_tok
             cache_color = C_GREEN if hit_rate >= 0.70 else C_ORANGE if hit_rate >= 0.40 else C_RED
             bar         = cache_bar(hit_rate)
-            items.append(_styled(f"Cache  {bar}  {hit_rate*100:.0f}% hit  · saved {fmt(c_saved)}", color=cache_color, mono=True))
+            items.append(_rich_item(
+                ("Cache  ", C_DIM),
+                (bar, cache_color, False, True),
+                (f"  {hit_rate*100:.0f}%", cache_color, True),
+                (" hit  · saved ", C_DIM),
+                (fmt(c_saved), cache_color, True),
+            ))
 
         day_costs = [c for _, c in reversed(r["by_day"])]
         if len(day_costs) > 1:
@@ -566,7 +628,12 @@ class ClaudeMeterApp(rumps.App):
             items.append(_styled(f"{'Sessions':<24}{'today':>9}  {'session':>9}", color=C_DIM, mono=True))
             for s in sessions:
                 name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
-                items.append(_styled(f"{name:<24}{fmt(s['today_cost']):>9}  {fmt(s['total_cost']):>9}", mono=True))
+                items.append(_rich_item(
+                    (f"{name:<24}", "#f1f3f5", False, True),
+                    (f"{fmt(s['today_cost']):>9}", C_GREEN, True, True),
+                    ("  ", None, False, True),
+                    (f"{fmt(s['total_cost']):>9}", C_DIM, False, True),
+                ))
 
         # ── Models today (flat, not submenu) ─────────────────────────────
         if r["models_today"]:
@@ -574,12 +641,20 @@ class ClaudeMeterApp(rumps.App):
             items.append(_styled("Models today", color=C_DIM))
             total_today = sum(c for _, c, _, _ in r["models_today"])
             for model, cost, reqs, think in r["models_today"]:
-                short   = _short_model(model)
-                bar     = model_bar(cost, total_today)
-                pct_m   = int(cost / total_today * 100) if total_today else 0
-                think_s = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
-                mc      = C_RED if "opus" in model.lower() else C_GREEN if "haiku" in model.lower() else C_ORANGE
-                items.append(_styled(f"{short:<12} {bar}  {pct_m:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_s}", color=mc, mono=True))
+                short = _short_model(model)
+                bar   = model_bar(cost, total_today)
+                pct_m = int(cost / total_today * 100) if total_today else 0
+                mc    = C_RED if "opus" in model.lower() else C_GREEN if "haiku" in model.lower() else C_ORANGE
+                segs  = [
+                    (f"{short:<12} ", mc, True),
+                    (bar, mc, False, True),
+                    (f"  {pct_m:>3}%", mc, True),
+                    (f"  {fmt(cost):>8}", "#f1f3f5", True),
+                    (f"  ({reqs} reqs)", C_DIM),
+                ]
+                if think >= 0.01:
+                    segs += [("  ↯ ", C_ORANGE), (fmt(think), C_ORANGE, True)]
+                items.append(_rich_item(*segs))
 
         # ── Last 7 days ──────────────────────────────────────────────────
         items.append(None)
