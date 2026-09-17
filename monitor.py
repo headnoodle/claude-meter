@@ -448,7 +448,7 @@ def _show_settings_panel(app_instance) -> None:
         save_config(cfg)
         app_instance._refresh(None)
 
-VERSION       = "0.4.1"
+VERSION       = "0.4.3"
 CLAUDE_DIR    = Path.home() / ".claude" / "projects"
 DB_PATH       = Path.home() / ".claude-meter.db"
 CONFIG_PATH   = Path.home() / ".claude-meter.conf"
