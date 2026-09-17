@@ -24,7 +24,7 @@ macOS menu bar tool that tracks Claude Code API spend in real time, reading dire
 ### Homebrew (recommended)
 
 ```bash
-brew tap GITHUB_USER/tap
+brew tap headnoodle/tap
 brew install claude-meter
 ```
 
@@ -34,7 +34,7 @@ Then follow the printed caveats to symlink the xbar plugin.
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/GITHUB_USER/claude-meter.git ~/repos/claude-meter
+git clone https://github.com/headnoodle/claude-meter.git ~/repos/claude-meter
 
 # 2. Install xbar
 brew install --cask xbar

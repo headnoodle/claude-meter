@@ -1,7 +1,7 @@
 class ClaudeMeter < Formula
   desc "macOS menu bar tool that tracks Claude Code API spend in real time"
-  homepage "https://github.com/GITHUB_USER/claude-meter"
-  url "https://github.com/GITHUB_USER/claude-meter/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/headnoodle/claude-meter"
+  url "https://github.com/headnoodle/claude-meter/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "FILL_IN_AFTER_RELEASE"  # run: brew fetch --build-from-source Formula/claude-meter.rb
   license "MIT"
 
