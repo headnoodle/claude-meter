@@ -123,15 +123,34 @@ def ingest(db: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def report(db: sqlite3.Connection) -> dict:
-    today    = date.today().isoformat()
+    today        = date.today().isoformat()
     one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    seven_days_ago = (date.today() - timedelta(days=7)).isoformat()
+
+    # Average daily spend over the last 7 complete days (excludes today)
+    prev_days = db.execute("""
+        SELECT day, SUM(cost)
+        FROM requests
+        WHERE day >= ? AND day < ?
+        GROUP BY day
+    """, (seven_days_ago, today)).fetchall()
+    avg_daily = (sum(c for _, c in prev_days) / len(prev_days)) if prev_days else 0.0
+
+    today_cost = db.execute("SELECT COALESCE(SUM(cost),0) FROM requests WHERE day=?", (today,)).fetchone()[0]
+
+    if avg_daily > 0:
+        pct = (today_cost - avg_daily) / avg_daily * 100
+    else:
+        pct = None
 
     return {
-        "today_cost":  db.execute("SELECT COALESCE(SUM(cost),0) FROM requests WHERE day=?", (today,)).fetchone()[0],
+        "today_cost":  today_cost,
         "today_reqs":  db.execute("SELECT COUNT(*) FROM requests WHERE day=?", (today,)).fetchone()[0],
         "burn_rate":   db.execute(
             "SELECT COALESCE(SUM(cost),0) FROM requests WHERE ts >= ?", (one_hour_ago,)
         ).fetchone()[0],
+        "avg_daily":   avg_daily,
+        "trend_pct":   pct,
         "all_cost":    db.execute("SELECT COALESCE(SUM(cost),0) FROM requests").fetchone()[0],
         "all_reqs":    db.execute("SELECT COUNT(*) FROM requests").fetchone()[0],
         "since":       db.execute("SELECT MIN(day) FROM requests").fetchone()[0],
@@ -195,6 +214,11 @@ def main() -> None:
     budget_line = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
     print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}")
     print(f"Burn rate: {fmt(burn)}/hr  (rolling 1h)")
+
+    pct = r["trend_pct"]
+    if pct is not None:
+        arrow = "▲" if pct >= 0 else "▼"
+        print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)")
     print("---")
     print("Last 7 days")
     for day, cost in r["by_day"]:
