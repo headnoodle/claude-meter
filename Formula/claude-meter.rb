@@ -37,6 +37,16 @@ class ClaudeMeter < Formula
     chmod 0755, bin/"claude-meter"
   end
 
+  def post_install
+    # If the service is already loaded, restart it with the new binary.
+    plist_label = "homebrew.mxcl.claude-meter"
+    if system("/bin/launchctl", "list", plist_label, out: File::NULL, err: File::NULL)
+      system "/bin/launchctl", "kickstart", "-k", "gui/#{Process.uid}/#{plist_label}"
+    end
+  rescue StandardError
+    nil
+  end
+
   service do
     run        [opt_bin/"claude-meter"]
     keep_alive true
