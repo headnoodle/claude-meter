@@ -9,16 +9,19 @@ Designed to be called by xbar every minute; outputs xbar menu format.
 """
 
 import json
+import os
 import sqlite3
 import subprocess
 from datetime import date
 from pathlib import Path
 
-CLAUDE_DIR    = Path.home() / ".claude" / "projects"
-DB_PATH       = Path.home() / ".claude-meter.db"
+CLAUDE_DIR   = Path.home() / ".claude" / "projects"
+DB_PATH      = Path.home() / ".claude-meter.db"
 
-# Daily spend threshold for macOS notifications. Set to 0 to disable.
-DAILY_BUDGET  = 50.0
+# Daily spend threshold for macOS notifications.
+# Configurable via xbar Settings (right-click the menu bar item).
+# Falls back to this value when run outside xbar. Set to 0 to disable.
+DAILY_BUDGET = float(os.environ.get("CLAUDE_METER_DAILY_BUDGET", 50.0))
 
 PRICING = {
     "claude-sonnet-4-6":         {"i": 3.0,  "o": 15.0, "cw": 3.75, "cr": 0.30},
