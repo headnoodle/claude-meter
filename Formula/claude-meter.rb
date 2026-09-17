@@ -1,4 +1,6 @@
 class ClaudeMeter < Formula
+  include Language::Python::Virtualenv
+
   desc "macOS menu bar tool that tracks Claude Code API spend in real time"
   homepage "https://github.com/headnoodle/claude-meter"
   url "https://github.com/headnoodle/claude-meter/archive/refs/tags/v0.3.0.tar.gz"
