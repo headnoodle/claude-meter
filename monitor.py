@@ -309,13 +309,23 @@ def fmt(v: float) -> str:
     return f"${v:.2f}"
 
 
-def sparkline(values: list) -> str:
-    """Map a list of floats to Unicode block chars (oldest → newest, left → right)."""
+def sparkline(values: list, today_color: str = "") -> str:
+    """Map a list of floats to Unicode block chars (oldest → newest, left → right).
+
+    today_color: hex string like '#ffa94d' — colours the last (today) bar differently.
+    Requires ansi=true in the xbar line params.
+    """
     blocks = "▁▂▃▄▅▆▇█"
     if not values:
         return ""
     max_v = max(values) or 1
-    return "".join(blocks[min(7, int(v / max_v * 7.999))] for v in values)
+    chars = [blocks[min(7, int(v / max_v * 7.999))] for v in values]
+    if today_color and chars:
+        r = int(today_color[1:3], 16)
+        g = int(today_color[3:5], 16)
+        b = int(today_color[5:7], 16)
+        chars[-1] = f"\x1b[38;2;{r};{g};{b}m{chars[-1]}\x1b[0m"
+    return "".join(chars)
 
 
 def budget_bar(current: float, limit: float, width: int = 20) -> str:
@@ -387,8 +397,9 @@ def main() -> None:
     # Sparkline: by_day is DESC, reverse for left=oldest right=newest
     day_costs = [c for _, c in reversed(r["by_day"])]
     if len(day_costs) > 1:
-        spark = sparkline(day_costs)
-        print(f"Week  {spark} | font=Menlo size=13")
+        today_hl = bar_color if DAILY_BUDGET > 0 else "#ffa94d"
+        spark = sparkline(day_costs, today_color=today_hl)
+        print(f"Week  {spark} | font=Menlo size=13 ansi=true")
 
     # ── Active sessions ───────────────────────────────────────────────────────
     sessions = [s for s in active_sessions() if s["today_reqs"] > 0]
