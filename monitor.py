@@ -628,11 +628,12 @@ class ClaudeMeterApp(rumps.App):
             items.append(_styled(f"{'Sessions':<24}{'today':>9}  {'session':>9}", color=C_DIM, mono=True))
             for s in sessions:
                 name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
+                # All Menlo so padding keeps columns aligned
                 items.append(_rich_item(
-                    (f"{name:<24}", "#f1f3f5", False, True),
-                    (f"{fmt(s['today_cost']):>9}", C_GREEN, True, True),
-                    ("  ", None, False, True),
-                    (f"{fmt(s['total_cost']):>9}", C_DIM, False, True),
+                    (f"{name:<24}", "#f1f3f5", True,  True),
+                    (f"{fmt(s['today_cost']):>9}",  C_GREEN, False, True),
+                    ("  ",                           None,    False, True),
+                    (f"{fmt(s['total_cost']):>9}",  C_DIM,   False, True),
                 ))
 
         # ── Models today (flat, not submenu) ─────────────────────────────
@@ -645,15 +646,16 @@ class ClaudeMeterApp(rumps.App):
                 bar   = model_bar(cost, total_today)
                 pct_m = int(cost / total_today * 100) if total_today else 0
                 mc    = C_RED if "opus" in model.lower() else C_GREEN if "haiku" in model.lower() else C_ORANGE
-                segs  = [
-                    (f"{short:<12} ", mc, True),
-                    (bar, mc, False, True),
-                    (f"  {pct_m:>3}%", mc, True),
-                    (f"  {fmt(cost):>8}", "#f1f3f5", True),
-                    (f"  ({reqs} reqs)", C_DIM),
+                # All Menlo — bold name for emphasis, fixed padding keeps columns locked
+                segs = [
+                    (f"{short:<12} ", mc,        True,  True),
+                    (bar,             mc,        False, True),
+                    (f"  {pct_m:>3}%",mc,        False, True),
+                    (f"  {fmt(cost):>8}", "#f1f3f5", False, True),
+                    (f"  ({reqs} reqs)", C_DIM,   False, True),
                 ]
                 if think >= 0.01:
-                    segs += [("  ↯ ", C_ORANGE), (fmt(think), C_ORANGE, True)]
+                    segs += [("  ↯ ", C_ORANGE, False, True), (fmt(think), C_ORANGE, False, True)]
                 items.append(_rich_item(*segs))
 
         # ── Last 7 days ──────────────────────────────────────────────────
@@ -668,45 +670,42 @@ class ClaudeMeterApp(rumps.App):
         # ── Top projects ────────────────────────────────────────────────
         if r["top_projects_week"] or r["top_projects_all"]:
             proj_item = _mi("Top projects")
-            if r["top_projects_week"]:
-                week_sub = _mi("7 days")
-                total    = sum(c for _, c in r["top_projects_week"])
-                for cwd, cost in r["top_projects_week"]:
+            for label, rows in (("7 days", r["top_projects_week"]), ("All time", r["top_projects_all"])):
+                if not rows:
+                    continue
+                sub   = _mi(label)
+                total = sum(c for _, c in rows)
+                for cwd, cost in rows:
                     name  = (Path(cwd).name or cwd)[:14]
                     bar   = model_bar(cost, total)
                     pct_p = int(cost / total * 100) if total else 0
-                    week_sub.add(_styled(f"{name:<14} {bar}  {pct_p:>3}%  {fmt(cost):>8}", mono=True))
-                proj_item.add(week_sub)
-            if r["top_projects_all"]:
-                all_sub = _mi("All time")
-                total   = sum(c for _, c in r["top_projects_all"])
-                for cwd, cost in r["top_projects_all"]:
-                    name  = (Path(cwd).name or cwd)[:14]
-                    bar   = model_bar(cost, total)
-                    pct_p = int(cost / total * 100) if total else 0
-                    all_sub.add(_styled(f"{name:<14} {bar}  {pct_p:>3}%  {fmt(cost):>8}", mono=True))
-                proj_item.add(all_sub)
+                    sub.add(_rich_item(
+                        (f"{name:<14} ", "#f1f3f5", True,  True),
+                        (bar,            C_ORANGE,  False, True),
+                        (f"  {pct_p:>3}%", C_ORANGE, False, True),
+                        (f"  {fmt(cost):>8}", "#f1f3f5", False, True),
+                    ))
+                proj_item.add(sub)
             items.append(proj_item)
 
         # ── Top branches ────────────────────────────────────────────────
         if r["top_branches_week"] or r["top_branches_all"]:
             br_item = _mi("Top branches")
-            if r["top_branches_week"]:
-                week_sub = _mi("7 days")
-                total    = sum(c for _, c in r["top_branches_week"])
-                for branch, cost in r["top_branches_week"]:
+            for label, rows in (("7 days", r["top_branches_week"]), ("All time", r["top_branches_all"])):
+                if not rows:
+                    continue
+                sub   = _mi(label)
+                total = sum(c for _, c in rows)
+                for branch, cost in rows:
                     bar   = model_bar(cost, total)
                     pct_b = int(cost / total * 100) if total else 0
-                    week_sub.add(_styled(f"{branch[:22]:<22} {bar}  {pct_b:>3}%  {fmt(cost):>8}", mono=True))
-                br_item.add(week_sub)
-            if r["top_branches_all"]:
-                all_sub = _mi("All time")
-                total   = sum(c for _, c in r["top_branches_all"])
-                for branch, cost in r["top_branches_all"]:
-                    bar   = model_bar(cost, total)
-                    pct_b = int(cost / total * 100) if total else 0
-                    all_sub.add(_styled(f"{branch[:22]:<22} {bar}  {pct_b:>3}%  {fmt(cost):>8}", mono=True))
-                br_item.add(all_sub)
+                    sub.add(_rich_item(
+                        (f"{branch[:22]:<22} ", "#f1f3f5", True,  True),
+                        (bar,                   C_ORANGE,  False, True),
+                        (f"  {pct_b:>3}%",       C_ORANGE, False, True),
+                        (f"  {fmt(cost):>8}",    "#f1f3f5", False, True),
+                    ))
+                br_item.add(sub)
             items.append(br_item)
 
         # ── Models all time ──────────────────────────────────────────────
@@ -714,12 +713,20 @@ class ClaudeMeterApp(rumps.App):
             mod_all   = _mi("Models (all time)")
             total_all = sum(c for _, c, _, _ in r["models_all"])
             for model, cost, reqs, think in r["models_all"]:
-                short   = _short_model(model)
-                bar     = model_bar(cost, total_all)
-                pct_m   = int(cost / total_all * 100) if total_all else 0
-                think_s = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
-                mc      = C_RED if "opus" in model.lower() else C_GREEN if "haiku" in model.lower() else C_ORANGE
-                mod_all.add(_styled(f"{short:<12} {bar}  {pct_m:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_s}", color=mc, mono=True))
+                short = _short_model(model)
+                bar   = model_bar(cost, total_all)
+                pct_m = int(cost / total_all * 100) if total_all else 0
+                mc    = C_RED if "opus" in model.lower() else C_GREEN if "haiku" in model.lower() else C_ORANGE
+                segs  = [
+                    (f"{short:<12} ", mc,        True,  True),
+                    (bar,             mc,        False, True),
+                    (f"  {pct_m:>3}%",mc,        False, True),
+                    (f"  {fmt(cost):>8}", "#f1f3f5", False, True),
+                    (f"  ({reqs} reqs)", C_DIM,   False, True),
+                ]
+                if think >= 0.01:
+                    segs += [("  ↯ ", C_ORANGE, False, True), (fmt(think), C_ORANGE, False, True)]
+                mod_all.add(_rich_item(*segs))
             items.append(mod_all)
 
         # ── Monthly ──────────────────────────────────────────────────────
