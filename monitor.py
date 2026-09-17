@@ -309,6 +309,29 @@ def fmt(v: float) -> str:
     return f"${v:.2f}"
 
 
+def sparkline(values: list) -> str:
+    """Map a list of floats to Unicode block chars (oldest → newest, left → right)."""
+    blocks = "▁▂▃▄▅▆▇█"
+    if not values:
+        return ""
+    max_v = max(values) or 1
+    return "".join(blocks[min(7, int(v / max_v * 7.999))] for v in values)
+
+
+def budget_bar(current: float, limit: float, width: int = 20) -> str:
+    """Return a filled block bar and a color hint based on how close to the limit."""
+    pct   = min(1.0, current / limit) if limit > 0 else 0
+    filled = round(pct * width)
+    bar   = "█" * filled + "░" * (width - filled)
+    if pct >= 0.85:
+        color = "#ff6b6b"
+    elif pct >= 0.6:
+        color = "#ffa94d"
+    else:
+        color = "#51cf66"
+    return bar, color
+
+
 def _short_model(model: str) -> str:
     """Collapse verbose model IDs to a readable short name."""
     m = model.lower()
@@ -343,9 +366,14 @@ def main() -> None:
     print("---")
 
     # ── Today summary ────────────────────────────────────────────────────────
-    budget_line  = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
-    today_color  = " | color=#ff6b6b" if over_budget else ""
+    budget_line = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
+    today_color = " | color=#ff6b6b" if over_budget else ""
     print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}{today_color}")
+
+    if DAILY_BUDGET > 0:
+        bar, bar_color = budget_bar(r["today_cost"], DAILY_BUDGET)
+        pct_num = min(100, r["today_cost"] / DAILY_BUDGET * 100)
+        print(f"{bar}  {pct_num:.0f}% of {fmt(DAILY_BUDGET)} | color={bar_color} font=Menlo size=11")
 
     burn_color = " | color=#ffa94d" if burn >= 0.01 else ""
     print(f"Burn rate: {fmt(burn)}/hr  (rolling 1h){burn_color}")
@@ -355,6 +383,12 @@ def main() -> None:
         arrow       = "▲" if pct >= 0 else "▼"
         trend_color = " | color=#ff6b6b" if pct >= 0 else " | color=#51cf66"
         print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day){trend_color}")
+
+    # Sparkline: by_day is DESC, reverse for left=oldest right=newest
+    day_costs = [c for _, c in reversed(r["by_day"])]
+    if len(day_costs) > 1:
+        spark = sparkline(day_costs)
+        print(f"Week  {spark} | font=Menlo size=13")
 
     # ── Active sessions ───────────────────────────────────────────────────────
     sessions = [s for s in active_sessions() if s["today_reqs"] > 0]
