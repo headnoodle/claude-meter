@@ -486,29 +486,31 @@ def _rich_item(*segments) -> rumps.MenuItem:
     return item
 
 
-def _sparkline_item(values: list, today_color: str) -> rumps.MenuItem:
-    """Week sparkline with today's bar highlighted in today_color."""
-    blocks = "▁▂▃▄▅▆▇█"
+def _sparkline2_items(values: list, today_color: str, bar_width: int = 3) -> list:
+    """Two-row block bar chart. Returns [top_item, bottom_item].
+
+    Each bar is bar_width chars wide. The top row shows the upper half of
+    tall bars (levels 9-16), the bottom row shows the lower half (levels 1-8).
+    Today's column is highlighted in today_color.
+    """
+    blocks = " ▁▂▃▄▅▆▇█"
     if not values:
-        return _styled("Week  (no data)", mono=True)
-    max_v  = max(values) or 1
-    chars  = [blocks[min(7, int(v / max_v * 7.999))] for v in values]
-    prefix = "Week  "
-    text   = prefix + "".join(chars)
-    item   = rumps.MenuItem(text, callback=lambda _: None)
-    if not _HAS_APPKIT:
-        return item
-    menlo  = _menlo_font()
-    base_attrs = {NSFontAttributeName: menlo} if menlo else {}
-    ns_str = NSMutableAttributedString.alloc().initWithString_attributes_(text, base_attrs)
-    # Colour the last character (today)
-    ns_str.addAttribute_value_range_(
-        NSForegroundColorAttributeName,
-        _ns_color(today_color),
-        (len(text) - 1, 1),
-    )
-    item._menuitem.setAttributedTitle_(ns_str)
-    return item
+        return [_styled("7 days  (no data)", color="#868e96", mono=True)]
+    max_v    = max(values) or 1
+    prefix   = "7 days  "
+    pad      = " " * len(prefix)
+    top_segs = [(prefix, "#868e96", False, True)]
+    bot_segs = [(pad,    None,      False, True)]
+    for i, v in enumerate(values):
+        norm    = v / max_v * 16
+        bot_lv  = min(8, round(norm))
+        top_lv  = max(0, round(norm) - 8)
+        bc      = blocks[bot_lv] * bar_width
+        tc      = blocks[top_lv] * bar_width
+        color   = today_color if i == len(values) - 1 else None
+        top_segs.append((tc, color, False, True))
+        bot_segs.append((bc, color, False, True))
+    return [_rich_item(*top_segs), _rich_item(*bot_segs)]
 
 
 def _mi(title: str) -> rumps.MenuItem:
@@ -616,11 +618,9 @@ class ClaudeMeterApp(rumps.App):
                 (fmt(c_saved), cache_color, True),
             ))
 
+        # sparkline is rendered further down, just before Last 7 days
         day_costs = [c for _, c in reversed(r["by_day"])]
-        if len(day_costs) > 1:
-            # today_hl: same colour as budget bar, or orange if no budget set
-            today_hl = bar_color if budget > 0 else C_ORANGE
-            items.append(_sparkline_item(day_costs, today_color=today_hl))
+        today_hl  = bar_color if budget > 0 else C_ORANGE
 
         # ── Sessions (flat, not submenu) ─────────────────────────────────
         if sessions:
@@ -657,6 +657,12 @@ class ClaudeMeterApp(rumps.App):
                 if think >= 0.01:
                     segs += [("  ↯ ", C_ORANGE, False, True), (fmt(think), C_ORANGE, False, True)]
                 items.append(_rich_item(*segs))
+
+        # ── 7-day sparkline (2 rows, wider) ──────────────────────────────
+        if len(day_costs) > 1:
+            items.append(None)
+            for row in _sparkline2_items(day_costs, today_hl):
+                items.append(row)
 
         # ── Last 7 days ──────────────────────────────────────────────────
         items.append(None)
