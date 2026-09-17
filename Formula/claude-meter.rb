@@ -17,11 +17,16 @@ class ClaudeMeter < Formula
   def caveats
     xbar_plugins = "#{Dir.home}/Library/Application Support/xbar/plugins"
     <<~EOS
-      Symlink the xbar plugin to start tracking:
-        mkdir -p "#{xbar_plugins}"
-        ln -sf "#{libexec}/claude_tokens.1m.py" \\
-               "#{xbar_plugins}/claude_tokens.1m.py"
-        open -a xbar
+      1. Install xbar (if not already installed):
+           brew install --cask xbar
+
+      2. Symlink the plugin:
+           mkdir -p "#{xbar_plugins}"
+           ln -sf "#{libexec}/claude_tokens.1m.py" \\
+                  "#{xbar_plugins}/claude_tokens.1m.py"
+
+      3. Launch xbar:
+           open -a xbar
 
       To set a daily budget (default $50), right-click the menu bar item
       and open xbar Settings.
