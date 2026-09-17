@@ -10,14 +10,26 @@ class ClaudeMeter < Formula
   depends_on :macos
   depends_on "python@3.12"
 
+  resource "pyobjc-core" do
+    url "https://files.pythonhosted.org/packages/cp312/p/pyobjc_core/pyobjc_core-12.2.2-cp312-cp312-macosx_10_13_universal2.whl"
+    sha256 "122e6ad302a2abf5d4d4adb0156db751600ddf2768441696cba17b31323085e7"
+  end
+
+  resource "pyobjc-framework-Cocoa" do
+    url "https://files.pythonhosted.org/packages/cp312/p/pyobjc_framework_cocoa/pyobjc_framework_cocoa-12.2.2-cp312-cp312-macosx_10_13_universal2.whl"
+    sha256 "e106f395531e67694376b0f1184612cbeea3ec8b9bf56b55ef41d026171d2a2d"
+  end
+
+  resource "rumps" do
+    url "https://files.pythonhosted.org/packages/source/r/rumps/rumps-0.4.0.tar.gz"
+    sha256 "17fb33c21b54b1e25db0d71d1d793dc19dc3c0b7d8c79dc6d833d0cffc8b1596"
+  end
+
   def install
     libexec.install "monitor.py"
-
-    # Create a virtualenv and install rumps (pulls in pyobjc automatically)
     venv = virtualenv_create(libexec, "python3.12")
-    venv.pip_install "rumps"
+    venv.pip_install resources
 
-    # Shim that runs monitor.py with the venv Python
     (bin/"claude-meter").write <<~EOS
       #!/bin/bash
       exec "#{libexec}/bin/python3" "#{libexec}/monitor.py" "$@"
@@ -25,8 +37,6 @@ class ClaudeMeter < Formula
     chmod 0755, bin/"claude-meter"
   end
 
-  # `brew services start claude-meter` creates a LaunchAgent that starts the
-  # menu bar app on login. No Dock icon appears (rumps uses accessory policy).
   service do
     run        [opt_bin/"claude-meter"]
     keep_alive true
@@ -39,8 +49,7 @@ class ClaudeMeter < Formula
       Start the menu bar app:
         brew services start claude-meter
 
-      To set a daily budget, click the 🤖 menu bar icon → Preferences → Set Budget…
-      The default is $50/day.
+      Right-click the 🤖 menu bar icon for Settings and Refresh.
 
       To stop:
         brew services stop claude-meter
