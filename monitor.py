@@ -275,7 +275,7 @@ def main() -> None:
     alert_str    = " ⚠️" if over_budget else ""
     this_month   = date.today().strftime("%Y-%m")
     month_cost   = next((c for m, c, _ in r["month_rows"] if m == this_month), 0.0)
-    print(f"🤖 {fmt(r['today_cost'])} today  |  {fmt(month_cost)} this month{burn_str}{alert_str}")
+    print(f"🤖 {fmt(r['today_cost'])} today  ·  {fmt(month_cost)} this month{burn_str}{alert_str}")
     print("---")
     budget_line = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
     print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}")
