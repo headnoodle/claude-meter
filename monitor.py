@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
@@ -18,15 +19,193 @@ import rumps
 try:
     from AppKit import (NSAttributedString, NSMutableAttributedString,
                         NSForegroundColorAttributeName,
-                        NSColor, NSFont, NSFontAttributeName)
+                        NSColor, NSFont, NSFontAttributeName,
+                        NSObject, NSMenu, NSMenuItem as NSRawMenuItem,
+                        NSWindow, NSTextField, NSButton, NSBox, NSApplication)
+
+    class _ClickHandler(NSObject):
+        """Objective-C target for the right-click context menu items."""
+        _app = None  # ClaudeMeterApp
+
+        def doRefresh_(self, sender):
+            if self._app:
+                self._app._refresh(None)
+
+        def doSettings_(self, sender):
+            if self._app:
+                self._app._set_budget(None)
+
+        def doQuit_(self, sender):
+            NSApplication.sharedApplication().terminate_(None)
+
+    class _SettingsHandler(NSObject):
+        """Button target for the Settings panel modal."""
+        _saved = False
+
+        def cancel_(self, sender):
+            NSApplication.sharedApplication().stopModal()
+
+        def save_(self, sender):
+            self._saved = True
+            NSApplication.sharedApplication().stopModal()
+
+    class _NumericDelegate(NSObject):
+        """NSTextFieldDelegate that strips non-numeric characters after each change."""
+        _allow_floats = False
+
+        def controlTextDidChange_(self, notification):
+            field   = notification.object()
+            text    = str(field.stringValue())
+            allowed = "0123456789" + ("." if self._allow_floats else "")
+            cleaned = "".join(c for c in text if c in allowed)
+            if cleaned != text:
+                field.setStringValue_(cleaned)
+
     _HAS_APPKIT = True
 except ImportError:
     _HAS_APPKIT = False
 
-VERSION     = "0.2.0"
-CLAUDE_DIR  = Path.home() / ".claude" / "projects"
-DB_PATH     = Path.home() / ".claude-meter.db"
-CONFIG_PATH = Path.home() / ".claude-meter.conf"
+
+def _show_settings_panel(app_instance) -> None:
+    """Display a proper AppKit settings panel modally."""
+    try:
+        from AppKit import NSBezelStyleRounded as _BEZEL
+    except ImportError:
+        _BEZEL = 1  # NSBezelStyleRounded
+
+    budget   = get_budget()
+    cfg      = load_config()
+    interval = int(cfg.get("refresh_interval", 15))
+
+    W, H  = 440, 310
+    PAD   = 20
+    LBL_W = 120
+    FLD_X = PAD + LBL_W + 10
+    FLD_W = W - FLD_X - PAD
+
+    win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        ((0, 0), (W, H)), 3, 2, False  # Titled|Closable, NSBackingStoreBuffered
+    )
+    win.setTitle_("claude-meter — Settings")
+    win.center()
+    win.setReleasedWhenClosed_(False)
+    cv = win.contentView()
+
+    def lbl(text, x, y, w=None, h=18, bold=False, size=13, secondary=False):
+        tf = NSTextField.alloc().initWithFrame_(((x, y), (w or W - x - PAD, h)))
+        tf.setStringValue_(text)
+        tf.setBezeled_(False)
+        tf.setDrawsBackground_(False)
+        tf.setEditable_(False)
+        tf.setSelectable_(False)
+        tf.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
+        if secondary:
+            tf.setTextColor_(NSColor.secondaryLabelColor())
+        cv.addSubview_(tf)
+        return tf
+
+    def fld(text, x, y, w, h=22, editable=True, mono=False):
+        tf = NSTextField.alloc().initWithFrame_(((x, y), (w, h)))
+        tf.setStringValue_(text)
+        tf.setEditable_(editable)
+        tf.setSelectable_(True)
+        if mono:
+            f = NSFont.fontWithName_size_("Menlo", 10)
+            if f:
+                tf.setFont_(f)
+        if not editable:
+            tf.setTextColor_(NSColor.secondaryLabelColor())
+        cv.addSubview_(tf)
+        return tf
+
+    def add_sep(y):
+        box = NSBox.alloc().initWithFrame_(((PAD, y), (W - 2 * PAD, 1)))
+        box.setBoxType_(2)  # NSBoxSeparator
+        cv.addSubview_(box)
+
+    # ── General ──────────────────────────────────────────────────────
+    lbl("GENERAL", PAD, 272, bold=True, size=10, secondary=True)
+
+    lbl("Daily Budget",   PAD, 242, w=LBL_W)
+    budget_field = fld(
+        str(int(budget) if budget == int(budget) else budget),
+        FLD_X, 240, 70,
+    )
+    _budget_del = _NumericDelegate.alloc().init()
+    _budget_del._allow_floats = True
+    budget_field.setDelegate_(_budget_del)
+    lbl("USD / day", FLD_X + 78, 242, w=100, secondary=True)
+
+    lbl("Refresh Every", PAD, 212, w=LBL_W)
+    interval_field = fld(str(interval), FLD_X, 210, 70)
+    _interval_del = _NumericDelegate.alloc().init()
+    _interval_del._allow_floats = False
+    interval_field.setDelegate_(_interval_del)
+    lbl("seconds", FLD_X + 78, 212, w=100, secondary=True)
+
+    lbl("Set budget to 0 to disable alerts.", PAD, 192, size=11, secondary=True)
+
+    # ── Paths ────────────────────────────────────────────────────────
+    add_sep(178)
+    lbl("PATHS", PAD, 158, bold=True, size=10, secondary=True)
+
+    lbl("Claude Data", PAD, 128, w=LBL_W)
+    fld(str(CLAUDE_DIR), FLD_X, 126, FLD_W, editable=False, mono=True)
+
+    lbl("Database", PAD, 98, w=LBL_W)
+    fld(str(DB_PATH), FLD_X, 96, FLD_W, editable=False, mono=True)
+
+    # ── Buttons ──────────────────────────────────────────────────────
+    add_sep(50)
+
+    sh = _SettingsHandler.alloc().init()
+
+    cancel_btn = NSButton.alloc().initWithFrame_(((W - 196, 14), (88, 28)))
+    cancel_btn.setTitle_("Cancel")
+    cancel_btn.setBezelStyle_(_BEZEL)
+    cancel_btn.setKeyEquivalent_("\x1b")
+    cancel_btn.setTarget_(sh)
+    cancel_btn.setAction_("cancel:")
+    cv.addSubview_(cancel_btn)
+
+    save_btn = NSButton.alloc().initWithFrame_(((W - 100, 14), (80, 28)))
+    save_btn.setTitle_("Save")
+    save_btn.setBezelStyle_(_BEZEL)
+    save_btn.setKeyEquivalent_("\r")
+    save_btn.setTarget_(sh)
+    save_btn.setAction_("save:")
+    cv.addSubview_(save_btn)
+
+    # Pin delegates to sh so they aren't garbage-collected during the modal
+    sh._budget_del   = _budget_del
+    sh._interval_del = _interval_del
+
+    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    NSApplication.sharedApplication().runModalForWindow_(win)
+    win.orderOut_(None)
+
+    if sh._saved:
+        cfg = load_config()
+        try:
+            cfg["daily_budget"] = float(
+                budget_field.stringValue().strip().lstrip("$")
+            )
+        except ValueError:
+            pass
+        try:
+            new_iv = int(interval_field.stringValue().strip())
+            if new_iv >= 15:
+                cfg["refresh_interval"] = new_iv
+        except ValueError:
+            pass
+        save_config(cfg)
+        app_instance._refresh(None)
+
+VERSION       = "0.3.0"
+CLAUDE_DIR    = Path.home() / ".claude" / "projects"
+DB_PATH       = Path.home() / ".claude-meter.db"
+CONFIG_PATH   = Path.home() / ".claude-meter.conf"
+_REFRESH_LAST = 0.0  # epoch time of last actual data refresh
 
 PRICING = {
     "claude-sonnet-4-6":         {"i": 3.0,  "o": 15.0, "cw": 3.75, "cr": 0.30},
@@ -271,62 +450,103 @@ def active_sessions(db: sqlite3.Connection) -> list:
         return []
 
     today = date.today().isoformat()
-    session_by_cwd: dict = {}
 
-    for jsonl in CLAUDE_DIR.rglob("*.jsonl"):
+    def _parse_jsonl(path: Path, seen: set):
+        title = None; cwd = None
+        today_cost = total_cost = 0.0
+        today_reqs = total_reqs = 0
         try:
-            if datetime.fromtimestamp(jsonl.stat().st_mtime).date() != date.today():
-                continue
-        except OSError:
-            continue
-
-        total_cost, total_reqs, cwd = 0.0, 0, None
-        try:
-            with open(jsonl, encoding="utf-8", errors="ignore") as f:
+            with open(path, encoding="utf-8", errors="ignore") as f:
                 for line in f:
-                    if "input_tokens" not in line:
+                    line = line.strip()
+                    if not line:
                         continue
                     try:
-                        d = json.loads(line.strip())
+                        d = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if d.get("type") != "assistant":
+                    t = d.get("type", "")
+                    if t == "custom-title":
+                        title = d.get("customTitle") or title
                         continue
+                    if t != "assistant" or "input_tokens" not in line:
+                        continue
+                    rid = d.get("requestId") or d.get("uuid", "")
+                    if rid in seen:
+                        continue
+                    seen.add(rid)
                     msg = d.get("message", {})
                     u   = msg.get("usage", {})
                     if not u or "input_tokens" not in u:
                         continue
-                    total_cost += request_cost(u, msg.get("model", ""))
-                    total_reqs += 1
                     if cwd is None:
-                        cwd = d.get("cwd", "")
+                        cwd = d.get("cwd") or None
+                    cost = request_cost(u, msg.get("model", ""))
+                    ts   = d.get("timestamp", "")
+                    total_cost += cost
+                    total_reqs += 1
+                    if ts[:10] == today:
+                        today_cost += cost
+                        today_reqs += 1
+        except OSError:
+            pass
+        return today_cost, today_reqs, total_cost, total_reqs, title, cwd
+
+    results = []
+    for jsonl in CLAUDE_DIR.rglob("*.jsonl"):
+        if "subagents" in jsonl.parts:
+            continue
+        try:
+            mtime = jsonl.stat().st_mtime
+            if datetime.fromtimestamp(mtime).date() != date.today():
+                continue
         except OSError:
             continue
 
-        if not cwd or total_cost == 0:
-            continue
-        if cwd not in session_by_cwd:
-            session_by_cwd[cwd] = {"total_cost": 0.0, "total_reqs": 0}
-        session_by_cwd[cwd]["total_cost"] += total_cost
-        session_by_cwd[cwd]["total_reqs"] += total_reqs
+        seen = set()
+        tc, tr, tot_c, tot_r, title, cwd = _parse_jsonl(jsonl, seen)
+        last_ts   = mtime
+        sub_tc    = 0.0
+        sub_count = 0
+        sub_peak  = 0.0
 
-    results = []
-    for cwd, sess in session_by_cwd.items():
-        today_cost, today_reqs = db.execute(
-            "SELECT COALESCE(SUM(cost),0), COUNT(*) FROM requests WHERE day=? AND cwd=?",
-            (today, cwd),
-        ).fetchone()
-        if today_reqs == 0:
+        sub_dir = jsonl.parent / jsonl.stem / "subagents"
+        if sub_dir.exists():
+            for sub in sub_dir.glob("*.jsonl"):
+                s_tc, s_tr, s_tot_c, s_tot_r, s_title, s_cwd = _parse_jsonl(sub, seen)
+                if s_tr > 0:
+                    sub_count += 1
+                    sub_peak = max(sub_peak, s_tc)
+                tc += s_tc; tr += s_tr
+                sub_tc  += s_tc
+                tot_c   += s_tot_c; tot_r += s_tot_r
+                if title is None:
+                    title = s_title
+                if cwd is None:
+                    cwd = s_cwd
+                try:
+                    last_ts = max(last_ts, sub.stat().st_mtime)
+                except OSError:
+                    pass
+
+        if tr == 0:
             continue
+
+        label = title or (Path(cwd).name if cwd else jsonl.stem[:8])
         results.append({
-            "cwd":        cwd,
-            "total_cost": sess["total_cost"],
-            "total_reqs": sess["total_reqs"],
-            "today_cost": today_cost,
-            "today_reqs": today_reqs,
+            "label":      label,
+            "cwd":        cwd or "",
+            "total_cost": tot_c,
+            "today_cost": tc,
+            "sub_cost":   sub_tc,
+            "sub_peak":   sub_peak,
+            "sub_count":  sub_count,
+            "total_reqs": tot_r,
+            "today_reqs": tr,
+            "last_ts":    last_ts,
         })
 
-    return sorted(results, key=lambda x: x["today_cost"], reverse=True)
+    return sorted(results, key=lambda x: x["last_ts"], reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -486,31 +706,46 @@ def _rich_item(*segments) -> rumps.MenuItem:
     return item
 
 
-def _sparkline2_items(values: list, today_color: str, bar_width: int = 3) -> list:
-    """Two-row block bar chart. Returns [top_item, bottom_item].
+def _sparkline_item(values: list, today_color: str, bar_width: int = 2) -> rumps.MenuItem:
+    """Single-row block chart with large Menlo font so bars are visually tall.
 
-    Each bar is bar_width chars wide. The top row shows the upper half of
-    tall bars (levels 9-16), the bottom row shows the lower half (levels 1-8).
-    Today's column is highlighted in today_color.
+    The 'thickness' comes from font size (26pt), not multiple rows — no gap issue.
+    The label uses small Menlo so it doesn't dominate. Today is highlighted;
+    previous days are dimmed to give contrast.
     """
-    blocks = " ▁▂▃▄▅▆▇█"
+    blocks = "▁▂▃▄▅▆▇█"
     if not values:
-        return [_styled("7 days  (no data)", color="#868e96", mono=True)]
-    max_v    = max(values) or 1
-    prefix   = "7 days  "
-    pad      = " " * len(prefix)
-    top_segs = [(prefix, "#868e96", False, True)]
-    bot_segs = [(pad,    None,      False, True)]
+        return _styled("7 days  (no data)", color="#868e96")
+
+    max_v  = max(values) or 1
+    prefix = "7 days  "
+    dim_c  = "#4a5568"
+
+    parts = [(prefix, "#868e96", False)]
     for i, v in enumerate(values):
-        norm    = v / max_v * 16
-        bot_lv  = min(8, round(norm))
-        top_lv  = max(0, round(norm) - 8)
-        bc      = blocks[bot_lv] * bar_width
-        tc      = blocks[top_lv] * bar_width
-        color   = today_color if i == len(values) - 1 else None
-        top_segs.append((tc, color, False, True))
-        bot_segs.append((bc, color, False, True))
-    return [_rich_item(*top_segs), _rich_item(*bot_segs)]
+        c     = blocks[min(7, int(v / max_v * 7.999))]
+        color = today_color if i == len(values) - 1 else dim_c
+        parts.append((c * bar_width, color, True))
+
+    full_text = "".join(t for t, _, _ in parts)
+    item      = rumps.MenuItem(full_text, callback=lambda _: None)
+    if not _HAS_APPKIT:
+        return item
+
+    menlo_lbl = NSFont.fontWithName_size_("Menlo", 11.0)
+    menlo_bar = NSFont.fontWithName_size_("Menlo", 26.0)
+    ns_str    = NSMutableAttributedString.alloc().initWithString_attributes_(full_text, {})
+
+    pos = 0
+    for text, color, is_bar in parts:
+        n   = len(text)
+        rng = (pos, n)
+        ns_str.addAttribute_value_range_(NSForegroundColorAttributeName, _ns_color(color), rng)
+        ns_str.addAttribute_value_range_(NSFontAttributeName, menlo_bar if is_bar else menlo_lbl, rng)
+        pos += n
+
+    item._menuitem.setAttributedTitle_(ns_str)
+    return item
 
 
 def _mi(title: str) -> rumps.MenuItem:
@@ -523,11 +758,74 @@ def _mi(title: str) -> rumps.MenuItem:
 
 class ClaudeMeterApp(rumps.App):
     def __init__(self):
-        super().__init__("🤖", quit_button=rumps.MenuItem("Quit claude-meter"))
+        super().__init__("🤖", quit_button=None)
+        if _HAS_APPKIT:
+            # Hide from Dock and Cmd+Tab — menu bar only
+            NSApplication.sharedApplication().setActivationPolicy_(1)
+        self._click_setup_done = False
         self._refresh(None)
 
-    @rumps.timer(60)
-    def _refresh(self, _):
+    @rumps.timer(1)
+    def _setup_click_handler(self, _):
+        """Wire up right-click context menu on the status bar button.
+
+        Runs once, 1 s after the event loop starts (when nsstatusitem exists).
+        Left-click  → native setMenu_ behaviour (works on first click always).
+        Right-click → intercepted by a local NSEvent monitor; shows a small
+                      context menu without disturbing the native left-click path.
+        """
+        if self._click_setup_done or not _HAS_APPKIT:
+            return
+        self._click_setup_done = True
+        try:
+            from AppKit import NSEvent
+            si = self._nsapp.nsstatusitem
+
+            # Ensure native menu is attached (left-click works on first click)
+            si.setMenu_(self.menu._menu)
+
+            # Build right-click context menu
+            ctx = NSMenu.alloc().init()
+            ctx.setAutoenablesItems_(False)
+
+            handler = _ClickHandler.alloc().init()
+            handler._app = self
+            self._click_handler = handler  # prevent GC
+
+            for title, sel in (
+                ("↺  Refresh",  "doRefresh:"),
+                ("⚙  Settings", "doSettings:"),
+                ("↩  Restart",  "doQuit:"),
+            ):
+                mi = NSRawMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
+                mi.setEnabled_(True)
+                mi.setTarget_(handler)
+                ctx.addItem_(mi)
+
+            # Intercept right-clicks before they reach the status item
+            # (which would otherwise show the main menu on right-click too)
+            def _on_right_click(event):
+                si.popUpStatusItemMenu_(ctx)
+                return None  # consume the event
+
+            self._right_click_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                8,  # NSEventMaskRightMouseDown
+                _on_right_click,
+            )
+        except Exception:
+            pass
+
+    @rumps.timer(15)
+    def _refresh(self, sender):
+        global _REFRESH_LAST
+        # When called from the timer (sender is not None), respect the
+        # configured interval; direct calls (sender=None) always run.
+        if sender is not None and _REFRESH_LAST > 0:
+            cfg      = load_config()
+            interval = max(15, int(cfg.get("refresh_interval", 15)))
+            if time.time() - _REFRESH_LAST < interval:
+                return
+        _REFRESH_LAST = time.time()
         try:
             budget   = get_budget()
             db       = open_db()
@@ -625,15 +923,26 @@ class ClaudeMeterApp(rumps.App):
         # ── Sessions (flat, not submenu) ─────────────────────────────────
         if sessions:
             items.append(None)
-            items.append(_styled(f"{'Sessions':<24}{'today':>9}  {'session':>9}", color=C_DIM, mono=True))
+            items.append(_styled(f"{'Session':<18}{'total':>8}  {'main':>8}  {'agents':>8}  {'peak':>8}  {'subs':>4}", color=C_DIM, mono=True))
             for s in sessions:
-                name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
-                # All Menlo so padding keeps columns aligned
+                name      = s["label"][:18]
+                sub_c     = s["sub_cost"]
+                sub_n     = s["sub_count"]
+                main_c    = s["today_cost"] - sub_c
+                agent_str = fmt(sub_c)        if sub_n else "—"
+                peak_str  = fmt(s["sub_peak"]) if sub_n else "—"
+                subs_str  = str(sub_n)         if sub_n else "—"
                 items.append(_rich_item(
-                    (f"{name:<24}", "#f1f3f5", True,  True),
-                    (f"{fmt(s['today_cost']):>9}",  C_GREEN, False, True),
-                    ("  ",                           None,    False, True),
-                    (f"{fmt(s['total_cost']):>9}",  C_DIM,   False, True),
+                    (f"{name:<18}",               "#f1f3f5", True,  True),
+                    (f"{fmt(s['today_cost']):>8}", C_GREEN,  False, True),
+                    ("  ",                         None,     False, True),
+                    (f"{fmt(main_c):>8}",          C_DIM,    False, True),
+                    ("  ",                         None,     False, True),
+                    (f"{agent_str:>8}",            C_ORANGE, False, True),
+                    ("  ",                         None,     False, True),
+                    (f"{peak_str:>8}",             C_DIM,    False, True),
+                    ("  ",                         None,     False, True),
+                    (f"{subs_str:>4}",             C_DIM,    False, True),
                 ))
 
         # ── Models today (flat, not submenu) ─────────────────────────────
@@ -658,11 +967,10 @@ class ClaudeMeterApp(rumps.App):
                     segs += [("  ↯ ", C_ORANGE, False, True), (fmt(think), C_ORANGE, False, True)]
                 items.append(_rich_item(*segs))
 
-        # ── 7-day sparkline (2 rows, wider) ──────────────────────────────
+        # ── 7-day sparkline ──────────────────────────────────────────────
         if len(day_costs) > 1:
             items.append(None)
-            for row in _sparkline2_items(day_costs, today_hl):
-                items.append(row)
+            items.append(_sparkline_item(day_costs, today_hl))
 
         # ── Last 7 days ──────────────────────────────────────────────────
         items.append(None)
@@ -743,46 +1051,38 @@ class ClaudeMeterApp(rumps.App):
                 monthly.add(_styled(f"{month}  {fmt(cost):>8}  ({reqs} reqs){' ◀' if month == this_month else ''}", color=mc, mono=True))
             items.append(monthly)
 
-        # ── Preferences ──────────────────────────────────────────────────
-        items.append(None)
-        prefs = _mi("Preferences")
-        prefs.add(_styled(f"Daily Budget: {fmt(budget)}", color=C_DIM))
-        prefs.add(rumps.MenuItem("Set Budget…", callback=self._set_budget))
-        items.append(prefs)
-
         # ── Footer ───────────────────────────────────────────────────────
         items.append(None)
         items.append(_styled(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)", color=C_GREEN))
         if r["since"]:
             items.append(_styled(f"Tracked since: {r['since']}", color=C_GREEN))
-        items.append(None)
-        items.append(_styled(f"DB: {DB_PATH}", color=C_DIM))
-
         self.menu.clear()
         for item in items:
             self.menu.add(rumps.separator if item is None else item)
 
     def _set_budget(self, _) -> None:
-        budget = get_budget()
-        disp   = str(int(budget)) if budget == int(budget) else str(budget)
-        w      = rumps.Window(
-            message="Enter daily budget in USD (0 to disable alerts):",
-            title="Set Daily Budget",
-            default_text=disp,
-            ok="Save",
-            cancel="Cancel",
-            dimensions=(200, 20),
-        )
-        response = w.run()
-        if response.clicked:
-            try:
-                new_budget = float(response.text.strip().lstrip("$"))
-                cfg = load_config()
-                cfg["daily_budget"] = new_budget
-                save_config(cfg)
-                self._refresh(None)
-            except ValueError:
-                rumps.alert("Invalid budget — please enter a number.")
+        if _HAS_APPKIT:
+            _show_settings_panel(self)
+        else:
+            budget = get_budget()
+            disp   = str(int(budget)) if budget == int(budget) else str(budget)
+            w      = rumps.Window(
+                message="Daily budget in USD (0 to disable alerts):",
+                title="Settings",
+                default_text=disp,
+                ok="Save",
+                cancel="Cancel",
+                dimensions=(200, 20),
+            )
+            response = w.run()
+            if response.clicked:
+                try:
+                    cfg = load_config()
+                    cfg["daily_budget"] = float(response.text.strip().lstrip("$"))
+                    save_config(cfg)
+                    self._refresh(None)
+                except ValueError:
+                    pass
 
 
 if __name__ == "__main__":
