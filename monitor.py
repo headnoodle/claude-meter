@@ -172,6 +172,17 @@ def report(db: sqlite3.Connection) -> dict:
         "by_day":      db.execute(
             "SELECT day, ROUND(SUM(cost),2) FROM requests GROUP BY day ORDER BY day DESC LIMIT 7"
         ).fetchall(),
+        # Model breakdown for today and all time
+        "models_today": db.execute("""
+            SELECT model, ROUND(SUM(cost),2), COUNT(*)
+            FROM requests WHERE day=? AND model != '' AND model != '<synthetic>'
+            GROUP BY model ORDER BY SUM(cost) DESC
+        """, (today,)).fetchall(),
+        "models_all": db.execute("""
+            SELECT model, ROUND(SUM(cost),2), COUNT(*)
+            FROM requests WHERE model != '' AND model != '<synthetic>'
+            GROUP BY model ORDER BY SUM(cost) DESC
+        """).fetchall(),
         # Top projects by cost this week and all time, excluding blanks
         "top_projects_week": db.execute("""
             SELECT cwd, ROUND(SUM(cost),2) AS total
@@ -226,6 +237,21 @@ def fmt(v: float) -> str:
     return f"${v:.2f}"
 
 
+def _short_model(model: str) -> str:
+    """Collapse verbose model IDs to a readable short name."""
+    m = model.lower()
+    if "fable"  in m: return "Fable 5"
+    if "opus-5" in m: return "Opus 5"
+    if "opus-4-8" in m: return "Opus 4.8"
+    if "opus-4" in m: return "Opus 4"
+    if "sonnet-5" in m: return "Sonnet 5"
+    if "sonnet-4-6" in m: return "Sonnet 4.6"
+    if "sonnet-4" in m: return "Sonnet 4"
+    if "haiku-4-5" in m: return "Haiku 4.5"
+    if "haiku" in m: return "Haiku"
+    return model  # unknown — show raw
+
+
 def main() -> None:
     db = open_db()
     ingest(db)
@@ -247,6 +273,14 @@ def main() -> None:
     if pct is not None:
         arrow = "▲" if pct >= 0 else "▼"
         print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)")
+
+    if r["models_today"]:
+        print("---")
+        print("Models today")
+        for model, cost, reqs in r["models_today"]:
+            short = _short_model(model)
+            print(f"  {fmt(cost):>8}  {short}  ({reqs} reqs)")
+
     print("---")
     print("Last 7 days")
     for day, cost in r["by_day"]:
@@ -265,6 +299,13 @@ def main() -> None:
         for cwd, cost in r["top_projects_all"]:
             name = Path(cwd).name or cwd
             print(f"  {fmt(cost):>8}  {name}")
+
+    if r["models_all"]:
+        print("---")
+        print("Models (all time)")
+        for model, cost, reqs in r["models_all"]:
+            short = _short_model(model)
+            print(f"  {fmt(cost):>8}  {short}  ({reqs} reqs)")
 
     print("---")
     print(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)")
