@@ -448,11 +448,12 @@ def _show_settings_panel(app_instance) -> None:
         save_config(cfg)
         app_instance._refresh(None)
 
-VERSION       = "0.4.5"
-CLAUDE_DIR    = Path.home() / ".claude" / "projects"
-DB_PATH       = Path.home() / ".claude-meter.db"
-CONFIG_PATH   = Path.home() / ".claude-meter.conf"
-_REFRESH_LAST = 0.0  # epoch time of last actual data refresh
+VERSION        = "0.4.6"
+CLAUDE_DIR     = Path.home() / ".claude" / "projects"
+DB_PATH        = Path.home() / ".claude-meter.db"
+CONFIG_PATH    = Path.home() / ".claude-meter.conf"
+_REFRESH_LAST  = 0.0  # epoch time of last actual data refresh
+_RUNNING_SCRIPT = Path(__file__).resolve()  # resolved path at startup, used for upgrade detection
 
 PRICING = {
     "claude-sonnet-4-6":         {"i": 3.0,  "o": 15.0, "cw": 3.75, "cr": 0.30},
@@ -463,6 +464,42 @@ PRICING = {
     "<synthetic>":               {"i": 0.0,  "o": 0.0,  "cw": 0.0,  "cr": 0.0 },
 }
 DEFAULT_P = {"i": 3.0, "o": 15.0, "cw": 3.75, "cr": 0.30}
+
+
+# ---------------------------------------------------------------------------
+# Brew upgrade self-restart
+# ---------------------------------------------------------------------------
+
+def _check_brew_upgrade() -> None:
+    """
+    If running from a brew Cellar install and a newer version is linked at
+    opt/claude-meter, exec into it. The opt symlink always points to the
+    current version after `brew upgrade`, so the running process picks it
+    up on the next refresh tick without needing any post_install hook.
+    """
+    try:
+        parts = _RUNNING_SCRIPT.parts
+        if "Cellar" not in parts:
+            return  # dev / manual install — skip
+        prefix     = Path(*parts[:parts.index("Cellar")])
+        opt_script = prefix / "opt" / "claude-meter" / "libexec" / "monitor.py"
+        if not opt_script.exists():
+            return
+        new_script = opt_script.resolve()
+        if new_script == _RUNNING_SCRIPT:
+            return  # already on the current version
+        new_python = new_script.parent.parent / "bin" / "python3"
+        if not new_python.exists():
+            return
+        # Release the instance lock so the incoming process can acquire it
+        try:
+            fcntl.flock(_LOCK_FH, fcntl.LOCK_UN)
+            _LOCK_FH.close()
+        except Exception:
+            pass
+        os.execv(str(new_python), [str(new_python), str(new_script)])
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1195,6 +1232,7 @@ class ClaudeMeterApp(rumps.App):
     @rumps.timer(15)
     def _refresh(self, sender):
         global _REFRESH_LAST
+        _check_brew_upgrade()
         # When called from the timer (sender is not None), respect the
         # configured interval; direct calls (sender=None) always run.
         if sender is not None and _REFRESH_LAST > 0:
