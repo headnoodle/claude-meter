@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
+from typing import Optional
 
 CLAUDE_DIR   = Path.home() / ".claude" / "projects"
 DB_PATH      = Path.home() / ".claude-meter.db"
@@ -210,6 +211,52 @@ def report(db: sqlite3.Connection) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Current session
+# ---------------------------------------------------------------------------
+
+def current_session() -> tuple:
+    """Cost and request count for the most recently active JSONL session file."""
+    if not CLAUDE_DIR.exists():
+        return 0.0, 0, None
+
+    jsonl_files = list(CLAUDE_DIR.rglob("*.jsonl"))
+    if not jsonl_files:
+        return 0.0, 0, None
+
+    latest = max(jsonl_files, key=lambda p: p.stat().st_mtime)
+
+    # Only treat as "current" if touched in the last 4 hours
+    mtime = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc)
+    if datetime.now(timezone.utc) - mtime > timedelta(hours=4):
+        return 0.0, 0, None
+
+    cost, reqs, cwd = 0.0, 0, None
+    try:
+        with open(latest, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if "input_tokens" not in line:
+                    continue
+                try:
+                    d = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") != "assistant":
+                    continue
+                msg = d.get("message", {})
+                u = msg.get("usage", {})
+                if not u or "input_tokens" not in u:
+                    continue
+                cost += request_cost(u, msg.get("model", ""))
+                reqs += 1
+                if cwd is None:
+                    cwd = d.get("cwd", "")
+    except OSError:
+        pass
+
+    return cost, reqs, cwd
+
+
+# ---------------------------------------------------------------------------
 # Budget alerts
 # ---------------------------------------------------------------------------
 
@@ -285,6 +332,12 @@ def main() -> None:
     if pct is not None:
         arrow = "▲" if pct >= 0 else "▼"
         print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)")
+
+    sess_cost, sess_reqs, sess_cwd = current_session()
+    if sess_cost > 0:
+        sess_name = Path(sess_cwd).name if sess_cwd else "?"
+        print("---")
+        print(f"Session: {fmt(sess_cost)} ({sess_reqs} reqs)  [{sess_name}]")
 
     if r["models_today"]:
         print("---")
