@@ -331,71 +331,83 @@ def main() -> None:
     check_budget(db, r["today_cost"])
     db.close()
 
-    over_budget  = DAILY_BUDGET > 0 and r["today_cost"] >= DAILY_BUDGET
-    burn         = r["burn_rate"]
-    burn_str     = f" · {fmt(burn)}/hr" if burn >= 0.01 else ""
-    alert_str    = " ⚠️" if over_budget else ""
-    this_month   = date.today().strftime("%Y-%m")
-    month_cost   = next((c for m, c, _ in r["month_rows"] if m == this_month), 0.0)
+    over_budget = DAILY_BUDGET > 0 and r["today_cost"] >= DAILY_BUDGET
+    burn        = r["burn_rate"]
+    burn_str    = f" · {fmt(burn)}/hr" if burn >= 0.01 else ""
+    alert_str   = " ⚠️" if over_budget else ""
+    this_month  = date.today().strftime("%Y-%m")
+    month_cost  = next((c for m, c, _ in r["month_rows"] if m == this_month), 0.0)
+
+    # ── Title bar ────────────────────────────────────────────────────────────
     print(f"🤖 {fmt(r['today_cost'])} today  ·  {fmt(month_cost)} this month{burn_str}{alert_str}")
     print("---")
-    budget_line = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
-    print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}")
-    print(f"Burn rate: {fmt(burn)}/hr  (rolling 1h)")
+
+    # ── Today summary ────────────────────────────────────────────────────────
+    budget_line  = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
+    today_color  = " | color=#ff6b6b" if over_budget else ""
+    print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}{today_color}")
+
+    burn_color = " | color=#ffa94d" if burn >= 0.01 else ""
+    print(f"Burn rate: {fmt(burn)}/hr  (rolling 1h){burn_color}")
 
     pct = r["trend_pct"]
     if pct is not None:
-        arrow = "▲" if pct >= 0 else "▼"
-        print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)")
+        arrow       = "▲" if pct >= 0 else "▼"
+        trend_color = " | color=#ff6b6b" if pct >= 0 else " | color=#51cf66"
+        print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day){trend_color}")
 
+    # ── Active sessions ───────────────────────────────────────────────────────
     sessions = [s for s in active_sessions() if s["today_reqs"] > 0]
     if sessions:
         print("---")
-        print(f"{'Sessions':<24}{'today':>9}  {'session':>9} | font=Menlo size=11")
+        print(f"{'Sessions':<24}{'today':>9}  {'session':>9} | font=Menlo size=11 color=#868e96")
         for s in sessions:
             name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
             print(f"{name:<24}{fmt(s['today_cost']):>9}  {fmt(s['total_cost']):>9} | font=Menlo size=11")
 
+    # ── Models today (visible — short and useful) ─────────────────────────────
     if r["models_today"]:
         print("---")
-        print("Models today")
+        print("Models today | color=#868e96")
         for model, cost, reqs in r["models_today"]:
-            short = _short_model(model)
-            print(f"  {fmt(cost):>8}  {short}  ({reqs} reqs)")
+            print(f"  {fmt(cost):>8}  {_short_model(model)}  ({reqs} reqs)")
 
+    # ── Last 7 days (submenu) ─────────────────────────────────────────────────
     print("---")
-    print("Last 7 days")
+    print("Last 7 days | color=#868e96")
     for day, cost in r["by_day"]:
         marker = " ◀" if day == date.today().isoformat() else ""
-        print(f"  {day}  {fmt(cost)}{marker}")
-    print("---")
-    if r["top_projects_week"]:
-        print("Top projects (7 days)")
-        for cwd, cost in r["top_projects_week"]:
-            name = Path(cwd).name or cwd
-            print(f"  {fmt(cost):>8}  {name}")
+        print(f"-- {day}  {fmt(cost)}{marker}")
 
-    if r["top_projects_all"]:
+    # ── Top projects (submenu, 7 days and all time nested) ────────────────────
+    if r["top_projects_week"] or r["top_projects_all"]:
         print("---")
-        print("Top projects (all time)")
-        for cwd, cost in r["top_projects_all"]:
-            name = Path(cwd).name or cwd
-            print(f"  {fmt(cost):>8}  {name}")
+        print("Top projects | color=#868e96")
+        if r["top_projects_week"]:
+            print("-- 7 days | color=#868e96")
+            for cwd, cost in r["top_projects_week"]:
+                print(f"---- {fmt(cost):>8}  {Path(cwd).name or cwd}")
+        if r["top_projects_all"]:
+            print("-- All time | color=#868e96")
+            for cwd, cost in r["top_projects_all"]:
+                print(f"---- {fmt(cost):>8}  {Path(cwd).name or cwd}")
 
+    # ── Models all time (submenu) ─────────────────────────────────────────────
     if r["models_all"]:
         print("---")
-        print("Models (all time)")
+        print("Models (all time) | color=#868e96")
         for model, cost, reqs in r["models_all"]:
-            short = _short_model(model)
-            print(f"  {fmt(cost):>8}  {short}  ({reqs} reqs)")
+            print(f"-- {fmt(cost):>8}  {_short_model(model)}  ({reqs} reqs)")
 
+    # ── Monthly (submenu) ─────────────────────────────────────────────────────
     if r["month_rows"]:
         print("---")
-        print("Monthly")
+        print("Monthly | color=#868e96")
         for month, cost, reqs in r["month_rows"]:
             marker = " ◀" if month == this_month else ""
-            print(f"  {month}  {fmt(cost):>8}  ({reqs} reqs){marker}")
+            print(f"-- {month}  {fmt(cost):>8}  ({reqs} reqs){marker}")
 
+    # ── Footer ────────────────────────────────────────────────────────────────
     print("---")
     print(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)")
     if r["since"]:
