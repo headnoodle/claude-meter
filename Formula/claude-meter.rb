@@ -38,11 +38,16 @@ class ClaudeMeter < Formula
   end
 
   def post_install
-    # If the service is already loaded, restart it with the new binary.
-    plist_label = "homebrew.mxcl.claude-meter"
-    if system("/bin/launchctl", "list", plist_label, out: File::NULL, err: File::NULL)
-      system "/bin/launchctl", "kickstart", "-k", "gui/#{Process.uid}/#{plist_label}"
-    end
+    # Restart the service if the user has it configured (plist exists).
+    # brew upgrade stops the service before post_install runs, so we can't
+    # rely on launchctl list — check for the plist file instead.
+    plist_path = File.expand_path("~/Library/LaunchAgents/homebrew.mxcl.claude-meter.plist")
+    return unless File.exist?(plist_path)
+
+    target = "gui/#{Process.uid}"
+    # Silently remove any stale entry, then start fresh with the new binary.
+    system "/bin/launchctl", "bootout", target, plist_path, out: File::NULL, err: File::NULL
+    system "/bin/launchctl", "bootstrap", target, plist_path
   rescue StandardError
     nil
   end
