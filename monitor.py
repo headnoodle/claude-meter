@@ -34,11 +34,12 @@ try:
                         NSColor, NSFont, NSFontAttributeName,
                         NSObject, NSMenu, NSMenuItem as NSRawMenuItem,
                         NSWindow, NSTextField, NSButton, NSBox, NSApplication,
-                        NSBezierPath, NSGraphicsContext, NSImage,
+                        NSBezierPath, NSGraphicsContext, NSImage, NSImageView,
                         NSPopUpButton, NSSegmentedControl,
                         NSTextAttachment,
                         NSCompositingOperationSourceIn,
-                        NSCompositingOperationSourceOver)
+                        NSCompositingOperationSourceOver,
+                        NSWorkspace)
 
     class _ClickHandler(NSObject):
         """Objective-C target for the right-click context menu items."""
@@ -51,6 +52,9 @@ try:
         def doSettings_(self, sender):
             if self._app:
                 self._app._set_budget(None)
+
+        def doAbout_(self, sender):
+            _show_about_panel()
 
         def doQuit_(self, sender):
             NSApplication.sharedApplication().terminate_(None)
@@ -87,6 +91,113 @@ try:
     _HAS_APPKIT = True
 except ImportError:
     _HAS_APPKIT = False
+
+
+def _show_about_panel() -> None:
+    """Show a small modal About window."""
+    if not _HAS_APPKIT:
+        return
+    try:
+        from AppKit import NSBezelStyleRounded as _BEZEL
+    except ImportError:
+        _BEZEL = 1
+
+    W, H = 320, 280
+    win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        ((0, 0), (W, H)), 3, 2, False
+    )
+    win.setTitle_("About claude-meter")
+    win.center()
+    win.setReleasedWhenClosed_(False)
+    cv = win.contentView()
+
+    # ── Brain icon ───────────────────────────────────────────────────
+    cfg       = load_config()
+    icon_name = cfg.get("icon", "brain")
+    sym = NSImage.imageWithSystemSymbolName_accessibilityDescription_(icon_name, None)
+    if sym:
+        iv = NSImageView.alloc().initWithFrame_(((W // 2 - 30, 210), (60, 60)))
+        iv.setImage_(sym)
+        iv.setImageScaling_(1)  # NSImageScaleAxesIndependently → fills frame
+        cv.addSubview_(iv)
+
+    # ── Text fields ──────────────────────────────────────────────────
+    def lbl(text, y, size=13, bold=False, secondary=False, center=True):
+        tf = NSTextField.alloc().initWithFrame_(((0, y), (W, size + 6)))
+        tf.setStringValue_(text)
+        tf.setBezeled_(False)
+        tf.setDrawsBackground_(False)
+        tf.setEditable_(False)
+        tf.setSelectable_(False)
+        tf.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
+        if secondary:
+            tf.setTextColor_(NSColor.secondaryLabelColor())
+        if center:
+            tf.setAlignment_(2)  # NSTextAlignmentCenter
+        cv.addSubview_(tf)
+
+    lbl("claude-meter", 175, size=22, bold=True)
+    lbl(f"Version {VERSION}", 152, size=13, secondary=True)
+    lbl("Tracks Claude Code API spend in real time.", 122, size=12, secondary=True)
+    lbl("Reads local transcripts — no API key required.", 104, size=12, secondary=True)
+
+    # ── Separator ────────────────────────────────────────────────────
+    box = NSBox.alloc().initWithFrame_(((20, 92), (W - 40, 1)))
+    box.setBoxType_(2)
+    cv.addSubview_(box)
+
+    lbl("MIT License  ·  © headnoodle", 72, size=11, secondary=True)
+
+    # ── GitHub link button ───────────────────────────────────────────
+    link = NSButton.alloc().initWithFrame_(((W // 2 - 120, 46), (240, 20)))
+    link.setTitle_("github.com/headnoodle/claude-meter")
+    link.setBordered_(False)
+    link.setBezelStyle_(0)
+    link_attrs = {
+        NSFontAttributeName: NSFont.systemFontOfSize_(12.0),
+        NSForegroundColorAttributeName: NSColor.linkColor(),
+    }
+    link.setAttributedTitle_(
+        NSAttributedString.alloc().initWithString_attributes_(
+            "github.com/headnoodle/claude-meter", link_attrs
+        )
+    )
+
+    class _LinkHandler(NSObject):
+        def click_(self, sender):
+            from AppKit import NSURL
+            NSWorkspace.sharedWorkspace().openURL_(
+                NSURL.URLWithString_("https://github.com/headnoodle/claude-meter")
+            )
+
+    _lh = _LinkHandler.alloc().init()
+    link.setTarget_(_lh)
+    link.setAction_("click:")
+    cv.addSubview_(link)
+
+    # ── Close button ─────────────────────────────────────────────────
+    class _AboutHandler(NSObject):
+        def close_(self, sender):
+            NSApplication.sharedApplication().stopModal()
+
+    sh = _AboutHandler.alloc().init()
+    sh._link_handler = _lh  # prevent GC
+
+    close_btn = NSButton.alloc().initWithFrame_(((W // 2 - 44, 12), (88, 28)))
+    close_btn.setTitle_("Close")
+    close_btn.setBezelStyle_(_BEZEL)
+    close_btn.setKeyEquivalent_("\r")
+    close_btn.setTarget_(sh)
+    close_btn.setAction_("close:")
+    cv.addSubview_(close_btn)
+
+    _wd = _WinDelegate.alloc().init()
+    win.setDelegate_(_wd)
+    sh._win_delegate = _wd
+
+    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    NSApplication.sharedApplication().runModalForWindow_(win)
+    win.orderOut_(None)
 
 
 def _show_settings_panel(app_instance) -> None:
@@ -330,7 +441,7 @@ def _show_settings_panel(app_instance) -> None:
         save_config(cfg)
         app_instance._refresh(None)
 
-VERSION       = "0.3.0"
+VERSION       = "0.4.1"
 CLAUDE_DIR    = Path.home() / ".claude" / "projects"
 DB_PATH       = Path.home() / ".claude-meter.db"
 CONFIG_PATH   = Path.home() / ".claude-meter.conf"
@@ -1051,6 +1162,7 @@ class ClaudeMeterApp(rumps.App):
             for title, sel in (
                 ("↺  Refresh",  "doRefresh:"),
                 ("⚙  Settings", "doSettings:"),
+                ("ℹ  About",    "doAbout:"),
                 ("↩  Restart",  "doQuit:"),
             ):
                 mi = NSRawMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
