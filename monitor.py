@@ -12,9 +12,12 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+
+VERSION      = "0.1.0"
 
 CLAUDE_DIR   = Path.home() / ".claude" / "projects"
 DB_PATH      = Path.home() / ".claude-meter.db"
@@ -629,4 +632,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v"):
+        print(f"claude-meter {VERSION}")
+        sys.exit(0)
     main()

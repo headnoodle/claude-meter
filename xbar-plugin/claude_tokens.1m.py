@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # <xbar.title>Claude Meter</xbar.title>
-# <xbar.version>v5.0</xbar.version>
+# <xbar.version>v0.1.0</xbar.version>
 # <xbar.desc>Tracks Claude Code API spend from local transcripts</xbar.desc>
 # <xbar.var>number(CLAUDE_METER_DAILY_BUDGET=50): Daily spend budget in USD. Set to 0 to disable alerts.</xbar.var>
 
