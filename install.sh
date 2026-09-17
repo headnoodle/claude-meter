@@ -1,41 +1,42 @@
 #!/usr/bin/env bash
-# claude-meter installer — sets up the xbar plugin symlink and optionally
-# adds xbar to macOS Login Items so tracking starts at login.
+# Manual install helper — only needed if you're not using Homebrew.
+# Creates a local venv with rumps and registers a LaunchAgent.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-XBAR_PLUGINS="$HOME/Library/Application Support/xbar/plugins"
-PLUGIN_SRC="$SCRIPT_DIR/xbar-plugin/claude_tokens.1m.py"
-PLUGIN_DST="$XBAR_PLUGINS/claude_tokens.1m.py"
+VENV="$SCRIPT_DIR/.venv"
+PLIST="$HOME/Library/LaunchAgents/com.headnoodle.claude-meter.plist"
 
-echo "claude-meter installer"
-echo "======================"
+echo "Creating venv and installing rumps..."
+python3 -m venv "$VENV"
+"$VENV/bin/pip" install --quiet rumps
 
-# Check xbar is installed
-if ! [ -d "$HOME/Library/Application Support/xbar" ]; then
-  echo "xbar not found. Install it first:"
-  echo "  brew install --cask xbar"
-  exit 1
-fi
+echo "Writing LaunchAgent to $PLIST..."
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.headnoodle.claude-meter</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$VENV/bin/python3</string>
+    <string>$SCRIPT_DIR/monitor.py</string>
+  </array>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$HOME/.claude-meter.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/.claude-meter.log</string>
+</dict>
+</plist>
+EOF
 
-# Create plugins dir if needed and symlink the plugin
-mkdir -p "$XBAR_PLUGINS"
-ln -sf "$PLUGIN_SRC" "$PLUGIN_DST"
-echo "✓ xbar plugin symlinked"
-
-# Make monitor.py executable
-chmod +x "$SCRIPT_DIR/monitor.py"
-echo "✓ monitor.py is executable"
-
-# Add xbar to Login Items if not already present
-osascript - <<'APPLESCRIPT' 2>/dev/null && echo "✓ xbar added to Login Items" || echo "  (skipped Login Items — approve manually in System Settings › General › Login Items)"
-tell application "System Events"
-  set xbarPath to POSIX file "/Applications/xbar.app"
-  if not (exists login item "xbar") then
-    make new login item at end with properties {path:xbarPath, hidden:false}
-  end if
-end tell
-APPLESCRIPT
-
+launchctl load "$PLIST"
+echo "claude-meter started. Look for 🤖 in your menu bar."
 echo ""
-echo "Done. Run 'open -a xbar' to start tracking."
+echo "To stop:    launchctl unload $PLIST"
+echo "To restart: launchctl unload $PLIST && launchctl load $PLIST"

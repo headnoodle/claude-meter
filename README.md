@@ -2,15 +2,14 @@
 
 macOS menu bar tool that tracks Claude Code API spend in real time, reading directly from local transcripts.
 
-![xbar menu bar screenshot showing today cost, monthly cost, burn rate, cache hit rate and sparkline](docs/screenshot.png)
-
 ## Features
 
 - **Live spend tracking** — reads Claude Code JSONL transcripts every minute
 - **Persistent storage** — SQLite database survives the ~30-day transcript rotation
 - **Budget alerts** — macOS notifications at 50%, 75%, and 100% of your daily limit
+- **In-app budget config** — set your daily limit via the menu without touching env vars
 - **Burn rate** — rolling 1-hour spend rate
-- **Trend indicator** — today vs 7-day average, colour-coded
+- **Trend indicator** — today vs 7-day average
 - **Sparkline** — one-line visual of the last 7 days
 - **Cache efficiency** — hit rate bar with estimated dollar savings
 - **Active sessions** — per-project today cost vs full session cost
@@ -26,33 +25,29 @@ macOS menu bar tool that tracks Claude Code API spend in real time, reading dire
 ```bash
 brew tap headnoodle/tap
 brew install claude-meter
+brew services start claude-meter
 ```
 
-Then follow the printed caveats to symlink the xbar plugin.
+The 🤖 icon appears in your menu bar. To set a daily budget, click it → Preferences → Set Budget…
 
 ### Manual
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/headnoodle/claude-meter.git ~/repos/claude-meter
-
-# 2. Install xbar
-brew install --cask xbar
-
-# 3. Run the installer (symlinks the plugin and adds xbar to Login Items)
 bash ~/repos/claude-meter/install.sh
-
-# 4. Open xbar
-open -a xbar
 ```
 
 ## Configuration
 
-Right-click the menu bar item → **Open xbar Settings** to set your daily budget. The default is $50.
+Click **🤖 → Preferences → Set Budget…** to set a daily spend limit. The default is $50.
 
-| Setting | Default | Description |
-|---|---|---|
-| `CLAUDE_METER_DAILY_BUDGET` | `50` | Daily spend limit in USD. Set to `0` to disable alerts. |
+You can also set it via environment variable or `~/.claude-meter.conf`:
+
+```json
+{ "daily_budget": 100 }
+```
+
+Set to `0` to disable budget alerts.
 
 ## Database
 
@@ -79,36 +74,33 @@ sqlite3 ~/.claude-meter.db \
 
 ```
 claude-meter/
-  monitor.py               # core logic — ingestion, DB, reporting, xbar output
-  xbar-plugin/
-    claude_tokens.1m.py    # thin xbar wrapper (1m refresh interval)
+  monitor.py            # core logic — ingestion, DB, reporting, menu bar app
   Formula/
-    claude-meter.rb        # Homebrew formula
-  install.sh               # setup script
+    claude-meter.rb     # Homebrew formula
+  install.sh            # manual install script
 ```
 
 The database lives at `~/.claude-meter.db` (outside the repo).
+Config lives at `~/.claude-meter.conf` (written by the app when you set a budget).
 
 ## Development
 
 ```bash
-# Test output locally
+# Install rumps for local testing
+pip3 install rumps
+
+# Run the app
 python3 ~/repos/claude-meter/monitor.py
 
 # Check version
 python3 ~/repos/claude-meter/monitor.py --version
-
-# Re-symlink after moving the repo
-ln -sf ~/repos/claude-meter/xbar-plugin/claude_tokens.1m.py \
-       ~/Library/Application\ Support/xbar/plugins/claude_tokens.1m.py
 ```
 
 ## Requirements
 
 - macOS
-- [xbar](https://xbarapp.com)
 - Python 3.9+ (ships with macOS)
-- Claude Code CLI (`claude` command)
+- `rumps` Python package (installed automatically by Homebrew or `install.sh`)
 
 ## License
 
