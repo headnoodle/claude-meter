@@ -55,6 +55,8 @@ def open_db() -> sqlite3.Connection:
     cols = {row[1] for row in db.execute("PRAGMA table_info(requests)")}
     if "cwd" not in cols:
         db.execute("ALTER TABLE requests ADD COLUMN cwd TEXT")
+    if "thinking_cost" not in cols:
+        db.execute("ALTER TABLE requests ADD COLUMN thinking_cost REAL DEFAULT 0")
     db.execute("CREATE INDEX IF NOT EXISTS idx_cwd ON requests(cwd)")
     # Tracks which budget thresholds have already triggered a notification,
     # keyed by (day, threshold) so each crossing fires exactly once.
@@ -83,6 +85,12 @@ def request_cost(usage: dict, model: str) -> float:
     ) / 1e6
 
 
+def thinking_cost(usage: dict, model: str) -> float:
+    details = usage.get("output_tokens_details") or {}
+    tokens  = details.get("thinking_tokens", 0)
+    return tokens * PRICING.get(model, DEFAULT_P)["o"] / 1e6
+
+
 def ingest(db: sqlite3.Connection) -> None:
     """Walk JSONL transcripts and upsert every assistant request into the DB."""
     if not CLAUDE_DIR.exists():
@@ -108,19 +116,20 @@ def ingest(db: sqlite3.Connection) -> None:
                     if not u or "input_tokens" not in u:
                         continue
 
-                    rid   = d.get("requestId") or d.get("uuid", "")
-                    ts    = d.get("timestamp", "")
-                    day   = ts[:10] if ts else ""
-                    model = msg.get("model", "")
-                    cost  = request_cost(u, model)
-                    cwd   = d.get("cwd", "")
+                    rid        = d.get("requestId") or d.get("uuid", "")
+                    ts         = d.get("timestamp", "")
+                    day        = ts[:10] if ts else ""
+                    model      = msg.get("model", "")
+                    cost       = request_cost(u, model)
+                    think_cost = thinking_cost(u, model)
+                    cwd        = d.get("cwd", "")
 
                     if not rid or not day or cost == 0:
                         continue
 
                     db.execute(
-                        "INSERT OR IGNORE INTO requests (request_id, ts, day, model, cost, cwd) VALUES (?,?,?,?,?,?)",
-                        (rid, ts, day, model, cost, cwd),
+                        "INSERT OR IGNORE INTO requests (request_id, ts, day, model, cost, thinking_cost, cwd) VALUES (?,?,?,?,?,?,?)",
+                        (rid, ts, day, model, cost, think_cost, cwd),
                     )
 
                     # Backfill cwd on rows that predate the column
@@ -160,8 +169,9 @@ def report(db: sqlite3.Connection) -> dict:
         pct = None
 
     return {
-        "today_cost":  today_cost,
-        "today_reqs":  db.execute("SELECT COUNT(*) FROM requests WHERE day=?", (today,)).fetchone()[0],
+        "today_cost":       today_cost,
+        "today_thinking":   db.execute("SELECT COALESCE(SUM(thinking_cost),0) FROM requests WHERE day=?", (today,)).fetchone()[0],
+        "today_reqs":       db.execute("SELECT COUNT(*) FROM requests WHERE day=?", (today,)).fetchone()[0],
         "burn_rate":   db.execute(
             "SELECT COALESCE(SUM(cost),0) FROM requests WHERE ts >= ?", (one_hour_ago,)
         ).fetchone()[0],
@@ -185,12 +195,12 @@ def report(db: sqlite3.Connection) -> dict:
         """).fetchall(),
         # Model breakdown for today and all time
         "models_today": db.execute("""
-            SELECT model, ROUND(SUM(cost),2), COUNT(*)
+            SELECT model, ROUND(SUM(cost),2), COUNT(*), ROUND(SUM(thinking_cost),2)
             FROM requests WHERE day=? AND model != '' AND model != '<synthetic>'
             GROUP BY model ORDER BY SUM(cost) DESC
         """, (today,)).fetchall(),
         "models_all": db.execute("""
-            SELECT model, ROUND(SUM(cost),2), COUNT(*)
+            SELECT model, ROUND(SUM(cost),2), COUNT(*), ROUND(SUM(thinking_cost),2)
             FROM requests WHERE model != '' AND model != '<synthetic>'
             GROUP BY model ORDER BY SUM(cost) DESC
         """).fetchall(),
@@ -425,9 +435,10 @@ def main() -> None:
     print("---")
 
     # ── Today summary ────────────────────────────────────────────────────────
-    budget_line = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
-    today_color = " | color=#ff6b6b" if over_budget else ""
-    print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}{today_color}")
+    budget_line   = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
+    today_color   = " | color=#ff6b6b" if over_budget else ""
+    thinking_str  = f"  · ↯ {fmt(r['today_thinking'])} thinking" if r["today_thinking"] >= 0.01 else ""
+    print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){thinking_str}{budget_line}{today_color}")
 
     if DAILY_BUDGET > 0:
         bar, bar_color = budget_bar(r["today_cost"], DAILY_BUDGET)
@@ -462,13 +473,14 @@ def main() -> None:
     if r["models_today"]:
         print("---")
         print("Models today | color=#868e96")
-        total_today_cost = sum(c for _, c, _ in r["models_today"])
-        for model, cost, reqs in r["models_today"]:
-            short = _short_model(model)
-            bar   = model_bar(cost, total_today_cost)
-            pct   = int(cost / total_today_cost * 100) if total_today_cost else 0
-            color = _model_color(model)
-            print(f"{short:<12} {bar}  {pct:>3}%  {fmt(cost):>8}  ({reqs} reqs) | font=Menlo size=11 color={color}")
+        total_today_cost = sum(c for _, c, _, _ in r["models_today"])
+        for model, cost, reqs, think in r["models_today"]:
+            short     = _short_model(model)
+            bar       = model_bar(cost, total_today_cost)
+            pct       = int(cost / total_today_cost * 100) if total_today_cost else 0
+            color     = _model_color(model)
+            think_str = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
+            print(f"{short:<12} {bar}  {pct:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_str} | font=Menlo size=11 color={color}")
 
     # ── Last 7 days (submenu) ─────────────────────────────────────────────────
     print("---")
@@ -502,13 +514,14 @@ def main() -> None:
     if r["models_all"]:
         print("---")
         print("Models (all time) | color=#868e96")
-        total_all_cost = sum(c for _, c, _ in r["models_all"])
-        for model, cost, reqs in r["models_all"]:
-            short = _short_model(model)
-            bar   = model_bar(cost, total_all_cost)
-            pct   = int(cost / total_all_cost * 100) if total_all_cost else 0
-            color = _model_color(model)
-            print(f"-- {short:<12} {bar}  {pct:>3}%  {fmt(cost):>8}  ({reqs} reqs) | font=Menlo size=11 color={color}")
+        total_all_cost = sum(c for _, c, _, _ in r["models_all"])
+        for model, cost, reqs, think in r["models_all"]:
+            short     = _short_model(model)
+            bar       = model_bar(cost, total_all_cost)
+            pct       = int(cost / total_all_cost * 100) if total_all_cost else 0
+            color     = _model_color(model)
+            think_str = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
+            print(f"-- {short:<12} {bar}  {pct:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_str} | font=Menlo size=11 color={color}")
 
     # ── Monthly (submenu) ─────────────────────────────────────────────────────
     if r["month_rows"]:
