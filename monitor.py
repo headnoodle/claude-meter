@@ -10,11 +10,15 @@ Designed to be called by xbar every minute; outputs xbar menu format.
 
 import json
 import sqlite3
+import subprocess
 from datetime import date
 from pathlib import Path
 
-CLAUDE_DIR = Path.home() / ".claude" / "projects"
-DB_PATH    = Path.home() / ".claude-meter.db"
+CLAUDE_DIR    = Path.home() / ".claude" / "projects"
+DB_PATH       = Path.home() / ".claude-meter.db"
+
+# Daily spend threshold for macOS notifications. Set to 0 to disable.
+DAILY_BUDGET  = 50.0
 
 PRICING = {
     "claude-sonnet-4-6":         {"i": 3.0,  "o": 15.0, "cw": 3.75, "cr": 0.30},
@@ -43,6 +47,15 @@ def open_db() -> sqlite3.Connection:
         )
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_day ON requests(day)")
+    # Tracks which budget thresholds have already triggered a notification,
+    # keyed by (day, threshold) so each crossing fires exactly once.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS budget_alerts (
+            day        TEXT NOT NULL,
+            threshold  REAL NOT NULL,
+            PRIMARY KEY (day, threshold)
+        )
+    """)
     db.commit()
     return db
 
@@ -121,6 +134,36 @@ def report(db: sqlite3.Connection) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Budget alerts
+# ---------------------------------------------------------------------------
+
+def check_budget(db: sqlite3.Connection, today_cost: float) -> None:
+    """Fire a macOS notification the first time today's spend crosses DAILY_BUDGET."""
+    if DAILY_BUDGET <= 0 or today_cost < DAILY_BUDGET:
+        return
+
+    today = date.today().isoformat()
+    already_fired = db.execute(
+        "SELECT 1 FROM budget_alerts WHERE day=? AND threshold=?", (today, DAILY_BUDGET)
+    ).fetchone()
+
+    if already_fired:
+        return
+
+    db.execute(
+        "INSERT OR IGNORE INTO budget_alerts (day, threshold) VALUES (?,?)",
+        (today, DAILY_BUDGET),
+    )
+    db.commit()
+
+    subprocess.run([
+        "osascript", "-e",
+        f'display notification "You\'ve spent {fmt(today_cost)} today (budget: {fmt(DAILY_BUDGET)})" '
+        f'with title "claude-meter" subtitle "Daily budget reached" sound name "Basso"',
+    ], check=False)
+
+
+# ---------------------------------------------------------------------------
 # xbar output
 # ---------------------------------------------------------------------------
 
@@ -132,11 +175,15 @@ def main() -> None:
     db = open_db()
     ingest(db)
     r  = report(db)
+    check_budget(db, r["today_cost"])
     db.close()
 
-    print(f"🤖 {fmt(r['today_cost'])} today")
+    over_budget = DAILY_BUDGET > 0 and r["today_cost"] >= DAILY_BUDGET
+    title_suffix = " ⚠️" if over_budget else ""
+    print(f"🤖 {fmt(r['today_cost'])} today{title_suffix}")
     print("---")
-    print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests)")
+    budget_line = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
+    print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}")
     print("---")
     print("Last 7 days")
     for day, cost in r["by_day"]:
