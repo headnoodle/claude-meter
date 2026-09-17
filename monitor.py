@@ -15,6 +15,14 @@ from pathlib import Path
 
 import rumps
 
+try:
+    from AppKit import (NSAttributedString, NSMutableAttributedString,
+                        NSForegroundColorAttributeName,
+                        NSColor, NSFont, NSFontAttributeName)
+    _HAS_APPKIT = True
+except ImportError:
+    _HAS_APPKIT = False
+
 VERSION     = "0.2.0"
 CLAUDE_DIR  = Path.home() / ".claude" / "projects"
 DB_PATH     = Path.home() / ".claude-meter.db"
@@ -407,6 +415,69 @@ def _short_model(model: str) -> str:
     return model
 
 
+_MENLO: object = None
+
+
+def _menlo_font():
+    global _MENLO
+    if _HAS_APPKIT and _MENLO is None:
+        _MENLO = NSFont.fontWithName_size_("Menlo", 12.0)
+    return _MENLO
+
+
+def _ns_color(hex_str: str):
+    if not _HAS_APPKIT:
+        return None
+    r = int(hex_str[1:3], 16) / 255.0
+    g = int(hex_str[3:5], 16) / 255.0
+    b = int(hex_str[5:7], 16) / 255.0
+    return NSColor.colorWithRed_green_blue_alpha_(r, g, b, 1.0)
+
+
+def _styled(title: str, color: str = None, mono: bool = False) -> rumps.MenuItem:
+    """Display-only menu item with optional color and monospace font."""
+    item = rumps.MenuItem(title, callback=lambda _: None)
+    if not _HAS_APPKIT:
+        return item
+    attrs = {}
+    if color:
+        attrs[NSForegroundColorAttributeName] = _ns_color(color)
+    if mono:
+        f = _menlo_font()
+        if f:
+            attrs[NSFontAttributeName] = f
+    if attrs:
+        item._menuitem.setAttributedTitle_(
+            NSAttributedString.alloc().initWithString_attributes_(title, attrs)
+        )
+    return item
+
+
+def _sparkline_item(values: list, today_color: str) -> rumps.MenuItem:
+    """Week sparkline with today's bar highlighted in today_color."""
+    blocks = "▁▂▃▄▅▆▇█"
+    if not values:
+        return _styled("Week  (no data)", mono=True)
+    max_v  = max(values) or 1
+    chars  = [blocks[min(7, int(v / max_v * 7.999))] for v in values]
+    prefix = "Week  "
+    text   = prefix + "".join(chars)
+    item   = rumps.MenuItem(text, callback=lambda _: None)
+    if not _HAS_APPKIT:
+        return item
+    menlo  = _menlo_font()
+    base_attrs = {NSFontAttributeName: menlo} if menlo else {}
+    ns_str = NSMutableAttributedString.alloc().initWithString_attributes_(text, base_attrs)
+    # Colour the last character (today)
+    ns_str.addAttribute_value_range_(
+        NSForegroundColorAttributeName,
+        _ns_color(today_color),
+        (len(text) - 1, 1),
+    )
+    item._menuitem.setAttributedTitle_(ns_str)
+    return item
+
+
 def _mi(title: str) -> rumps.MenuItem:
     return rumps.MenuItem(title)
 
@@ -442,68 +513,84 @@ class ClaudeMeterApp(rumps.App):
         over_budget = budget > 0 and r["today_cost"] >= budget
         burn        = r["burn_rate"]
 
-        self.title = f"🤖 {fmt(r['today_cost'])}{'  ⚠️' if over_budget else ''}"
+        # Title matches old format exactly
+        alert  = "  ⚠️" if over_budget else ""
+        burn_s = f" · {fmt(burn)}/hr" if burn >= 0.01 else ""
+        self.title = f"🤖 {fmt(r['today_cost'])} today  ·  {fmt(month_cost)} this month{burn_s}{alert}"
+
+        # Palette
+        C_GREEN  = "#51cf66"
+        C_ORANGE = "#ffa94d"
+        C_RED    = "#ff6b6b"
+        C_DIM    = "#868e96"
 
         items = []
 
-        # Today summary
-        budget_str = f"  (budget: {fmt(budget)})" if budget > 0 else ""
-        think_str  = f"  · ↯ {fmt(r['today_thinking'])} thinking" if r["today_thinking"] >= 0.01 else ""
-        items.append(_mi(f"Today:  {fmt(r['today_cost'])} ({r['today_reqs']} reqs){think_str}{budget_str}"))
-        items.append(_mi(f"Month:  {fmt(month_cost)}"))
+        # ── Today summary ────────────────────────────────────────────────
+        budget_str  = f"  (budget: {fmt(budget)})" if budget > 0 else ""
+        think_str   = f"  · ↯ {fmt(r['today_thinking'])} thinking" if r["today_thinking"] >= 0.01 else ""
+        today_color = C_RED if over_budget else None
+        items.append(_styled(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){think_str}{budget_str}", color=today_color))
 
+        bar_color = C_DIM  # fallback if no budget
         if budget > 0:
-            bar, pct_n = budget_bar(r["today_cost"], budget)
-            items.append(_mi(f"{bar}  {pct_n*100:.0f}% of {fmt(budget)}"))
+            bar, pct_f = budget_bar(r["today_cost"], budget)
+            bar_color  = C_RED if pct_f >= 0.85 else C_ORANGE if pct_f >= 0.6 else C_GREEN
+            items.append(_styled(f"{bar}  {pct_f*100:.0f}% of {fmt(budget)}", color=bar_color, mono=True))
 
-        items.append(_mi(f"Burn rate:  {fmt(burn)}/hr  (rolling 1h)"))
+        burn_color = C_ORANGE if burn >= 0.01 else C_DIM
+        items.append(_styled(f"Burn rate: {fmt(burn)}/hr  (rolling 1h)", color=burn_color))
 
         if r["trend_pct"] is not None:
-            pct   = r["trend_pct"]
-            arrow = "▲" if pct >= 0 else "▼"
-            items.append(_mi(f"Trend:  {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)"))
+            pct         = r["trend_pct"]
+            arrow       = "▲" if pct >= 0 else "▼"
+            trend_color = C_RED if pct >= 0 else C_GREEN
+            items.append(_styled(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)", color=trend_color))
 
         cr_tok, ct_tok, c_saved = r["cache_today"]
         if ct_tok > 0:
-            hit_rate = cr_tok / ct_tok
-            bar      = cache_bar(hit_rate)
-            items.append(_mi(f"Cache  {bar}  {hit_rate*100:.0f}% hit · saved {fmt(c_saved)}"))
+            hit_rate    = cr_tok / ct_tok
+            cache_color = C_GREEN if hit_rate >= 0.70 else C_ORANGE if hit_rate >= 0.40 else C_RED
+            bar         = cache_bar(hit_rate)
+            items.append(_styled(f"Cache  {bar}  {hit_rate*100:.0f}% hit  · saved {fmt(c_saved)}", color=cache_color, mono=True))
 
         day_costs = [c for _, c in reversed(r["by_day"])]
         if len(day_costs) > 1:
-            items.append(_mi(f"Week   {sparkline(day_costs)}"))
+            # today_hl: same colour as budget bar, or orange if no budget set
+            today_hl = bar_color if budget > 0 else C_ORANGE
+            items.append(_sparkline_item(day_costs, today_color=today_hl))
 
-        # Sessions
+        # ── Sessions (flat, not submenu) ─────────────────────────────────
         if sessions:
             items.append(None)
-            hdr = _mi(f"{'Sessions':<24}{'today':>9}  {'session':>9}")
+            items.append(_styled(f"{'Sessions':<24}{'today':>9}  {'session':>9}", color=C_DIM, mono=True))
             for s in sessions:
                 name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
-                hdr.add(_mi(f"{name:<24}{fmt(s['today_cost']):>9}  {fmt(s['total_cost']):>9}"))
-            items.append(hdr)
+                items.append(_styled(f"{name:<24}{fmt(s['today_cost']):>9}  {fmt(s['total_cost']):>9}", mono=True))
 
-        # Models today
+        # ── Models today (flat, not submenu) ─────────────────────────────
         if r["models_today"]:
             items.append(None)
-            mod_item    = _mi("Models today")
+            items.append(_styled("Models today", color=C_DIM))
             total_today = sum(c for _, c, _, _ in r["models_today"])
             for model, cost, reqs, think in r["models_today"]:
                 short   = _short_model(model)
                 bar     = model_bar(cost, total_today)
                 pct_m   = int(cost / total_today * 100) if total_today else 0
                 think_s = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
-                mod_item.add(_mi(f"{short:<12} {bar}  {pct_m:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_s}"))
-            items.append(mod_item)
+                mc      = C_RED if "opus" in model.lower() else C_GREEN if "haiku" in model.lower() else C_ORANGE
+                items.append(_styled(f"{short:<12} {bar}  {pct_m:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_s}", color=mc, mono=True))
 
-        # Last 7 days
+        # ── Last 7 days ──────────────────────────────────────────────────
         items.append(None)
         days_item = _mi("Last 7 days")
+        today_iso = date.today().isoformat()
         for day, cost in r["by_day"]:
-            marker = " ◀" if day == date.today().isoformat() else ""
-            days_item.add(_mi(f"{day}  {fmt(cost)}{marker}"))
+            marker = " ◀" if day == today_iso else ""
+            days_item.add(_styled(f"{day}  {fmt(cost)}{marker}", color=C_GREEN if day == today_iso else None, mono=True))
         items.append(days_item)
 
-        # Top projects
+        # ── Top projects ────────────────────────────────────────────────
         if r["top_projects_week"] or r["top_projects_all"]:
             proj_item = _mi("Top projects")
             if r["top_projects_week"]:
@@ -513,7 +600,7 @@ class ClaudeMeterApp(rumps.App):
                     name  = (Path(cwd).name or cwd)[:14]
                     bar   = model_bar(cost, total)
                     pct_p = int(cost / total * 100) if total else 0
-                    week_sub.add(_mi(f"{name:<14} {bar}  {pct_p:>3}%  {fmt(cost):>8}"))
+                    week_sub.add(_styled(f"{name:<14} {bar}  {pct_p:>3}%  {fmt(cost):>8}", mono=True))
                 proj_item.add(week_sub)
             if r["top_projects_all"]:
                 all_sub = _mi("All time")
@@ -522,11 +609,11 @@ class ClaudeMeterApp(rumps.App):
                     name  = (Path(cwd).name or cwd)[:14]
                     bar   = model_bar(cost, total)
                     pct_p = int(cost / total * 100) if total else 0
-                    all_sub.add(_mi(f"{name:<14} {bar}  {pct_p:>3}%  {fmt(cost):>8}"))
+                    all_sub.add(_styled(f"{name:<14} {bar}  {pct_p:>3}%  {fmt(cost):>8}", mono=True))
                 proj_item.add(all_sub)
             items.append(proj_item)
 
-        # Top branches
+        # ── Top branches ────────────────────────────────────────────────
         if r["top_branches_week"] or r["top_branches_all"]:
             br_item = _mi("Top branches")
             if r["top_branches_week"]:
@@ -535,7 +622,7 @@ class ClaudeMeterApp(rumps.App):
                 for branch, cost in r["top_branches_week"]:
                     bar   = model_bar(cost, total)
                     pct_b = int(cost / total * 100) if total else 0
-                    week_sub.add(_mi(f"{branch[:22]:<22} {bar}  {pct_b:>3}%  {fmt(cost):>8}"))
+                    week_sub.add(_styled(f"{branch[:22]:<22} {bar}  {pct_b:>3}%  {fmt(cost):>8}", mono=True))
                 br_item.add(week_sub)
             if r["top_branches_all"]:
                 all_sub = _mi("All time")
@@ -543,11 +630,11 @@ class ClaudeMeterApp(rumps.App):
                 for branch, cost in r["top_branches_all"]:
                     bar   = model_bar(cost, total)
                     pct_b = int(cost / total * 100) if total else 0
-                    all_sub.add(_mi(f"{branch[:22]:<22} {bar}  {pct_b:>3}%  {fmt(cost):>8}"))
+                    all_sub.add(_styled(f"{branch[:22]:<22} {bar}  {pct_b:>3}%  {fmt(cost):>8}", mono=True))
                 br_item.add(all_sub)
             items.append(br_item)
 
-        # Models all time
+        # ── Models all time ──────────────────────────────────────────────
         if r["models_all"]:
             mod_all   = _mi("Models (all time)")
             total_all = sum(c for _, c, _, _ in r["models_all"])
@@ -556,31 +643,32 @@ class ClaudeMeterApp(rumps.App):
                 bar     = model_bar(cost, total_all)
                 pct_m   = int(cost / total_all * 100) if total_all else 0
                 think_s = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
-                mod_all.add(_mi(f"{short:<12} {bar}  {pct_m:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_s}"))
+                mc      = C_RED if "opus" in model.lower() else C_GREEN if "haiku" in model.lower() else C_ORANGE
+                mod_all.add(_styled(f"{short:<12} {bar}  {pct_m:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_s}", color=mc, mono=True))
             items.append(mod_all)
 
-        # Monthly
+        # ── Monthly ──────────────────────────────────────────────────────
         if r["month_rows"]:
             monthly = _mi("Monthly")
             for month, cost, reqs in r["month_rows"]:
-                marker = " ◀" if month == this_month else ""
-                monthly.add(_mi(f"{month}  {fmt(cost):>8}  ({reqs} reqs){marker}"))
+                mc = C_GREEN if month == this_month else None
+                monthly.add(_styled(f"{month}  {fmt(cost):>8}  ({reqs} reqs){' ◀' if month == this_month else ''}", color=mc, mono=True))
             items.append(monthly)
 
-        # Preferences
+        # ── Preferences ──────────────────────────────────────────────────
         items.append(None)
         prefs = _mi("Preferences")
-        prefs.add(rumps.MenuItem(f"Daily Budget: {fmt(budget)}", callback=None))
+        prefs.add(_styled(f"Daily Budget: {fmt(budget)}", color=C_DIM))
         prefs.add(rumps.MenuItem("Set Budget…", callback=self._set_budget))
         items.append(prefs)
 
-        # Footer
+        # ── Footer ───────────────────────────────────────────────────────
         items.append(None)
-        items.append(_mi(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)"))
+        items.append(_styled(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)", color=C_GREEN))
         if r["since"]:
-            items.append(_mi(f"Tracked since: {r['since']}"))
+            items.append(_styled(f"Tracked since: {r['since']}", color=C_GREEN))
         items.append(None)
-        items.append(_mi(f"DB: {DB_PATH}"))
+        items.append(_styled(f"DB: {DB_PATH}", color=C_DIM))
 
         self.menu.clear()
         for item in items:
