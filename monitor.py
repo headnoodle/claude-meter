@@ -57,7 +57,16 @@ def open_db() -> sqlite3.Connection:
         db.execute("ALTER TABLE requests ADD COLUMN cwd TEXT")
     if "thinking_cost" not in cols:
         db.execute("ALTER TABLE requests ADD COLUMN thinking_cost REAL DEFAULT 0")
+    if "cache_read_tokens" not in cols:
+        db.execute("ALTER TABLE requests ADD COLUMN cache_read_tokens INTEGER DEFAULT 0")
+    if "cache_total_tokens" not in cols:
+        db.execute("ALTER TABLE requests ADD COLUMN cache_total_tokens INTEGER DEFAULT 0")
+    if "cache_savings" not in cols:
+        db.execute("ALTER TABLE requests ADD COLUMN cache_savings REAL DEFAULT 0")
+    if "git_branch" not in cols:
+        db.execute("ALTER TABLE requests ADD COLUMN git_branch TEXT DEFAULT ''")
     db.execute("CREATE INDEX IF NOT EXISTS idx_cwd ON requests(cwd)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_branch ON requests(git_branch)")
     # Tracks which budget thresholds have already triggered a notification,
     # keyed by (day, threshold) so each crossing fires exactly once.
     db.execute("""
@@ -96,8 +105,9 @@ def ingest(db: sqlite3.Connection) -> None:
     if not CLAUDE_DIR.exists():
         return
 
-    # Collect request_ids that are missing cwd so we can backfill them
-    needs_cwd = {row[0] for row in db.execute("SELECT request_id FROM requests WHERE cwd IS NULL OR cwd = ''")}
+    needs_cwd    = {row[0] for row in db.execute("SELECT request_id FROM requests WHERE cwd IS NULL OR cwd = ''")}
+    needs_branch = {row[0] for row in db.execute("SELECT request_id FROM requests WHERE git_branch IS NULL OR git_branch = ''")}
+    needs_cache  = {row[0] for row in db.execute("SELECT request_id FROM requests WHERE cache_total_tokens = 0")}
 
     for jsonl in CLAUDE_DIR.rglob("*.jsonl"):
         try:
@@ -120,22 +130,40 @@ def ingest(db: sqlite3.Connection) -> None:
                     ts         = d.get("timestamp", "")
                     day        = ts[:10] if ts else ""
                     model      = msg.get("model", "")
+                    p          = PRICING.get(model, DEFAULT_P)
                     cost       = request_cost(u, model)
                     think_cost = thinking_cost(u, model)
                     cwd        = d.get("cwd", "")
+                    branch     = d.get("gitBranch", "") or ""
+                    cr_tok     = u.get("cache_read_input_tokens", 0)
+                    ct_tok     = u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + cr_tok
+                    c_savings  = cr_tok * (p["i"] - p["cr"]) / 1e6
 
                     if not rid or not day or cost == 0:
                         continue
 
                     db.execute(
-                        "INSERT OR IGNORE INTO requests (request_id, ts, day, model, cost, thinking_cost, cwd) VALUES (?,?,?,?,?,?,?)",
-                        (rid, ts, day, model, cost, think_cost, cwd),
+                        """INSERT OR IGNORE INTO requests
+                           (request_id, ts, day, model, cost, thinking_cost,
+                            cache_read_tokens, cache_total_tokens, cache_savings,
+                            git_branch, cwd)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (rid, ts, day, model, cost, think_cost,
+                         cr_tok, ct_tok, c_savings, branch, cwd),
                     )
 
-                    # Backfill cwd on rows that predate the column
                     if rid in needs_cwd and cwd:
                         db.execute("UPDATE requests SET cwd=? WHERE request_id=?", (cwd, rid))
                         needs_cwd.discard(rid)
+                    if rid in needs_branch and branch:
+                        db.execute("UPDATE requests SET git_branch=? WHERE request_id=?", (branch, rid))
+                        needs_branch.discard(rid)
+                    if rid in needs_cache and ct_tok > 0:
+                        db.execute(
+                            "UPDATE requests SET cache_read_tokens=?, cache_total_tokens=?, cache_savings=? WHERE request_id=?",
+                            (cr_tok, ct_tok, c_savings, rid),
+                        )
+                        needs_cache.discard(rid)
 
         except OSError:
             pass
@@ -203,6 +231,26 @@ def report(db: sqlite3.Connection) -> dict:
             SELECT model, ROUND(SUM(cost),2), COUNT(*), ROUND(SUM(thinking_cost),2)
             FROM requests WHERE model != '' AND model != '<synthetic>'
             GROUP BY model ORDER BY SUM(cost) DESC
+        """).fetchall(),
+        # Cache stats for today
+        "cache_today": db.execute("""
+            SELECT COALESCE(SUM(cache_read_tokens),0),
+                   COALESCE(SUM(cache_total_tokens),0),
+                   COALESCE(SUM(cache_savings),0)
+            FROM requests WHERE day=?
+        """, (today,)).fetchone(),
+        # Branch breakdown
+        "top_branches_week": db.execute("""
+            SELECT git_branch, ROUND(SUM(cost),2)
+            FROM requests
+            WHERE day >= ? AND git_branch != '' AND git_branch IS NOT NULL
+            GROUP BY git_branch ORDER BY SUM(cost) DESC LIMIT 7
+        """, (seven_days_ago,)).fetchall(),
+        "top_branches_all": db.execute("""
+            SELECT git_branch, ROUND(SUM(cost),2)
+            FROM requests
+            WHERE git_branch != '' AND git_branch IS NOT NULL
+            GROUP BY git_branch ORDER BY SUM(cost) DESC LIMIT 7
         """).fetchall(),
         # Top projects by cost this week and all time, excluding blanks
         "top_projects_week": db.execute("""
@@ -410,9 +458,21 @@ def _model_color(model: str) -> str:
 
 
 def model_bar(cost: float, total: float, width: int = 16) -> str:
-    pct   = cost / total if total > 0 else 0
+    pct    = cost / total if total > 0 else 0
     filled = round(pct * width)
     return "█" * filled + "░" * (width - filled)
+
+
+def cache_bar(hit_rate: float, width: int = 20) -> tuple:
+    filled = round(hit_rate * width)
+    bar    = "█" * filled + "░" * (width - filled)
+    if hit_rate >= 0.70:
+        color = "#51cf66"
+    elif hit_rate >= 0.40:
+        color = "#ffa94d"
+    else:
+        color = "#ff6b6b"
+    return bar, color
 
 
 def main() -> None:
@@ -453,6 +513,13 @@ def main() -> None:
         arrow       = "▲" if pct >= 0 else "▼"
         trend_color = " | color=#ff6b6b" if pct >= 0 else " | color=#51cf66"
         print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day){trend_color}")
+
+    # Cache hit rate bar
+    cr_tok, ct_tok, c_saved = r["cache_today"]
+    if ct_tok > 0:
+        hit_rate = cr_tok / ct_tok
+        bar, color = cache_bar(hit_rate)
+        print(f"Cache  {bar}  {hit_rate*100:.0f}% hit  · saved {fmt(c_saved)} | color={color} font=Menlo size=11")
 
     # Sparkline: by_day is DESC, reverse for left=oldest right=newest
     day_costs = [c for _, c in reversed(r["by_day"])]
@@ -509,6 +576,27 @@ def main() -> None:
                 bar  = model_bar(cost, total_all)
                 pct  = int(cost / total_all * 100) if total_all else 0
                 print(f"---- {name:<14} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
+
+    # ── Top branches (submenu) ───────────────────────────────────────────────
+    if r["top_branches_week"] or r["top_branches_all"]:
+        print("---")
+        print("Top branches | color=#868e96")
+        if r["top_branches_week"]:
+            print("-- 7 days | color=#868e96")
+            total = sum(c for _, c in r["top_branches_week"])
+            for branch, cost in r["top_branches_week"]:
+                name = branch[:22]
+                bar  = model_bar(cost, total)
+                pct  = int(cost / total * 100) if total else 0
+                print(f"---- {name:<22} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
+        if r["top_branches_all"]:
+            print("-- All time | color=#868e96")
+            total = sum(c for _, c in r["top_branches_all"])
+            for branch, cost in r["top_branches_all"]:
+                name = branch[:22]
+                bar  = model_bar(cost, total)
+                pct  = int(cost / total * 100) if total else 0
+                print(f"---- {name:<22} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
 
     # ── Models all time (submenu) ─────────────────────────────────────────────
     if r["models_all"]:
