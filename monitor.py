@@ -448,12 +448,20 @@ def main() -> None:
         print("Top projects | color=#868e96")
         if r["top_projects_week"]:
             print("-- 7 days | color=#868e96")
+            total_week = sum(c for _, c in r["top_projects_week"])
             for cwd, cost in r["top_projects_week"]:
-                print(f"---- {fmt(cost):>8}  {Path(cwd).name or cwd}")
+                name = (Path(cwd).name or cwd)[:14]
+                bar  = model_bar(cost, total_week)
+                pct  = int(cost / total_week * 100) if total_week else 0
+                print(f"---- {name:<14} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
         if r["top_projects_all"]:
             print("-- All time | color=#868e96")
+            total_all = sum(c for _, c in r["top_projects_all"])
             for cwd, cost in r["top_projects_all"]:
-                print(f"---- {fmt(cost):>8}  {Path(cwd).name or cwd}")
+                name = (Path(cwd).name or cwd)[:14]
+                bar  = model_bar(cost, total_all)
+                pct  = int(cost / total_all * 100) if total_all else 0
+                print(f"---- {name:<14} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
 
     # ── Models all time (submenu) ─────────────────────────────────────────────
     if r["models_all"]:
