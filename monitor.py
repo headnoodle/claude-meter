@@ -214,13 +214,18 @@ def report(db: sqlite3.Connection) -> dict:
 # Current session
 # ---------------------------------------------------------------------------
 
-def active_sessions() -> list:
-    """One entry per JSONL file modified today, with total-session and today-only costs."""
+def active_sessions(db: sqlite3.Connection) -> list:
+    """Sessions with JSONL files modified today.
+
+    Session total comes from reading the JSONL directly (may span multiple days).
+    Today cost comes from the DB so it is always consistent with the main Today total.
+    Multiple files sharing the same cwd are merged into one row.
+    """
     if not CLAUDE_DIR.exists():
         return []
 
     today = date.today().isoformat()
-    results = []
+    session_by_cwd: dict = {}
 
     for jsonl in CLAUDE_DIR.rglob("*.jsonl"):
         try:
@@ -229,10 +234,7 @@ def active_sessions() -> list:
         except OSError:
             continue
 
-        total_cost = today_cost = 0.0
-        total_reqs = today_reqs = 0
-        cwd = None
-
+        total_cost, total_reqs, cwd = 0.0, 0, None
         try:
             with open(jsonl, encoding="utf-8", errors="ignore") as f:
                 for line in f:
@@ -248,25 +250,36 @@ def active_sessions() -> list:
                     u = msg.get("usage", {})
                     if not u or "input_tokens" not in u:
                         continue
-                    cost = request_cost(u, msg.get("model", ""))
-                    total_cost += cost
+                    total_cost += request_cost(u, msg.get("model", ""))
                     total_reqs += 1
-                    if d.get("timestamp", "")[:10] == today:
-                        today_cost += cost
-                        today_reqs += 1
                     if cwd is None:
                         cwd = d.get("cwd", "")
         except OSError:
             continue
 
-        if total_cost > 0:
-            results.append({
-                "cwd":        cwd or "",
-                "total_cost": total_cost,
-                "total_reqs": total_reqs,
-                "today_cost": today_cost,
-                "today_reqs": today_reqs,
-            })
+        if not cwd or total_cost == 0:
+            continue
+        if cwd not in session_by_cwd:
+            session_by_cwd[cwd] = {"total_cost": 0.0, "total_reqs": 0}
+        session_by_cwd[cwd]["total_cost"] += total_cost
+        session_by_cwd[cwd]["total_reqs"] += total_reqs
+
+    results = []
+    for cwd, sess in session_by_cwd.items():
+        # today cost from DB — guaranteed consistent with the main Today line
+        today_cost, today_reqs = db.execute(
+            "SELECT COALESCE(SUM(cost),0), COUNT(*) FROM requests WHERE day=? AND cwd=?",
+            (today, cwd),
+        ).fetchone()
+        if today_reqs == 0:
+            continue
+        results.append({
+            "cwd":        cwd,
+            "total_cost": sess["total_cost"],
+            "total_reqs": sess["total_reqs"],
+            "today_cost": today_cost,
+            "today_reqs": today_reqs,
+        })
 
     return sorted(results, key=lambda x: x["today_cost"], reverse=True)
 
@@ -395,7 +408,8 @@ def model_bar(cost: float, total: float, width: int = 16) -> str:
 def main() -> None:
     db = open_db()
     ingest(db)
-    r  = report(db)
+    r        = report(db)
+    sessions = active_sessions(db)
     check_budget(db, r["today_cost"])
     db.close()
 
@@ -437,7 +451,6 @@ def main() -> None:
         print(f"Week  {spark} | font=Menlo size=13 ansi=true")
 
     # ── Active sessions ───────────────────────────────────────────────────────
-    sessions = [s for s in active_sessions() if s["today_reqs"] > 0]
     if sessions:
         print("---")
         print(f"{'Sessions':<24}{'today':>9}  {'session':>9} | font=Menlo size=11 color=#868e96")
