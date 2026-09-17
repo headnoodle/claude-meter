@@ -6,6 +6,7 @@ Runs as a persistent macOS menu bar app via rumps.
 Start on login with: brew services start claude-meter
 """
 
+import fcntl
 import json
 import os
 import sqlite3
@@ -15,6 +16,17 @@ from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 import rumps
+
+# ── Single-instance lock ─────────────────────────────────────────────────────
+_LOCK_PATH = Path.home() / ".claude-meter.lock"
+_LOCK_FH   = open(_LOCK_PATH, "w")
+try:
+    fcntl.flock(_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _LOCK_FH.write(str(os.getpid()))
+    _LOCK_FH.flush()
+except BlockingIOError:
+    print("claude-meter is already running — exiting.", file=sys.stderr)
+    sys.exit(0)
 
 try:
     from AppKit import (NSAttributedString, NSMutableAttributedString,
