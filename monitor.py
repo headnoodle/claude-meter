@@ -351,10 +351,10 @@ def main() -> None:
     sessions = [s for s in active_sessions() if s["today_reqs"] > 0]
     if sessions:
         print("---")
-        print(f"{'Sessions':<26}{'today':>8}  {'session':>8} | font=Menlo size=11")
+        print(f"{'Sessions':<24}{'today':>9}  {'session':>9} | font=Menlo size=11")
         for s in sessions:
             name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
-            print(f"  {name:<24}{fmt(s['today_cost']):>8}  {fmt(s['total_cost']):>8} | font=Menlo size=11")
+            print(f"{name:<24}{fmt(s['today_cost']):>9}  {fmt(s['total_cost']):>9} | font=Menlo size=11")
 
     if r["models_today"]:
         print("---")
