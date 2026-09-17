@@ -276,28 +276,50 @@ def active_sessions() -> list:
 # ---------------------------------------------------------------------------
 
 def check_budget(db: sqlite3.Connection, today_cost: float) -> None:
-    """Fire a macOS notification the first time today's spend crosses DAILY_BUDGET."""
-    if DAILY_BUDGET <= 0 or today_cost < DAILY_BUDGET:
+    """Fire a macOS notification when today's spend crosses 50%, 75%, or 100% of budget.
+
+    Only the highest newly-crossed threshold fires. All lower thresholds are
+    simultaneously marked as fired so they never fire in a later refresh.
+    """
+    if DAILY_BUDGET <= 0:
         return
 
-    today = date.today().isoformat()
-    already_fired = db.execute(
-        "SELECT 1 FROM budget_alerts WHERE day=? AND threshold=?", (today, DAILY_BUDGET)
-    ).fetchone()
+    today  = date.today().isoformat()
+    levels = [
+        (DAILY_BUDGET * 0.50, "50%",  "Halfway through daily budget"),
+        (DAILY_BUDGET * 0.75, "75%",  "75% of daily budget used"),
+        (DAILY_BUDGET * 1.00, "100%", "Daily budget reached"),
+    ]
 
-    if already_fired:
+    fired = {row[0] for row in db.execute(
+        "SELECT threshold FROM budget_alerts WHERE day=?", (today,)
+    )}
+
+    # Highest threshold crossed that hasn't fired yet
+    to_fire = None
+    for amount, label, subtitle in reversed(levels):
+        if today_cost >= amount and amount not in fired:
+            to_fire = (amount, label, subtitle)
+            break
+
+    if not to_fire:
         return
 
-    db.execute(
-        "INSERT OR IGNORE INTO budget_alerts (day, threshold) VALUES (?,?)",
-        (today, DAILY_BUDGET),
-    )
+    fire_amount, label, subtitle = to_fire
+
+    # Mark this level and every lower one as fired so they never trigger later
+    for amount, _, _ in levels:
+        if amount <= fire_amount:
+            db.execute(
+                "INSERT OR IGNORE INTO budget_alerts (day, threshold) VALUES (?,?)",
+                (today, amount),
+            )
     db.commit()
 
     subprocess.run([
         "osascript", "-e",
-        f'display notification "You\'ve spent {fmt(today_cost)} today (budget: {fmt(DAILY_BUDGET)})" '
-        f'with title "claude-meter" subtitle "Daily budget reached" sound name "Basso"',
+        f'display notification "Spent {fmt(today_cost)} today ({label} of {fmt(DAILY_BUDGET)} budget)" '
+        f'with title "claude-meter" subtitle "{subtitle}" sound name "Basso"',
     ], check=False)
 
 
