@@ -50,6 +50,11 @@ def open_db() -> sqlite3.Connection:
         )
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_day ON requests(day)")
+    # cwd added in v5.1 — add column to existing databases that predate it
+    cols = {row[1] for row in db.execute("PRAGMA table_info(requests)")}
+    if "cwd" not in cols:
+        db.execute("ALTER TABLE requests ADD COLUMN cwd TEXT")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_cwd ON requests(cwd)")
     # Tracks which budget thresholds have already triggered a notification,
     # keyed by (day, threshold) so each crossing fires exactly once.
     db.execute("""
@@ -82,6 +87,9 @@ def ingest(db: sqlite3.Connection) -> None:
     if not CLAUDE_DIR.exists():
         return
 
+    # Collect request_ids that are missing cwd so we can backfill them
+    needs_cwd = {row[0] for row in db.execute("SELECT request_id FROM requests WHERE cwd IS NULL OR cwd = ''")}
+
     for jsonl in CLAUDE_DIR.rglob("*.jsonl"):
         try:
             with open(jsonl, encoding="utf-8", errors="ignore") as f:
@@ -104,14 +112,21 @@ def ingest(db: sqlite3.Connection) -> None:
                     day   = ts[:10] if ts else ""
                     model = msg.get("model", "")
                     cost  = request_cost(u, model)
+                    cwd   = d.get("cwd", "")
 
                     if not rid or not day or cost == 0:
                         continue
 
                     db.execute(
-                        "INSERT OR IGNORE INTO requests (request_id, ts, day, model, cost) VALUES (?,?,?,?,?)",
-                        (rid, ts, day, model, cost),
+                        "INSERT OR IGNORE INTO requests (request_id, ts, day, model, cost, cwd) VALUES (?,?,?,?,?,?)",
+                        (rid, ts, day, model, cost, cwd),
                     )
+
+                    # Backfill cwd on rows that predate the column
+                    if rid in needs_cwd and cwd:
+                        db.execute("UPDATE requests SET cwd=? WHERE request_id=?", (cwd, rid))
+                        needs_cwd.discard(rid)
+
         except OSError:
             pass
 
@@ -157,6 +172,19 @@ def report(db: sqlite3.Connection) -> dict:
         "by_day":      db.execute(
             "SELECT day, ROUND(SUM(cost),2) FROM requests GROUP BY day ORDER BY day DESC LIMIT 7"
         ).fetchall(),
+        # Top projects by cost this week and all time, excluding blanks
+        "top_projects_week": db.execute("""
+            SELECT cwd, ROUND(SUM(cost),2) AS total
+            FROM requests
+            WHERE day >= ? AND cwd != ''
+            GROUP BY cwd ORDER BY total DESC LIMIT 5
+        """, (seven_days_ago,)).fetchall(),
+        "top_projects_all": db.execute("""
+            SELECT cwd, ROUND(SUM(cost),2) AS total
+            FROM requests
+            WHERE cwd != ''
+            GROUP BY cwd ORDER BY total DESC LIMIT 5
+        """).fetchall(),
     }
 
 
@@ -224,6 +252,20 @@ def main() -> None:
     for day, cost in r["by_day"]:
         marker = " ◀" if day == date.today().isoformat() else ""
         print(f"  {day}  {fmt(cost)}{marker}")
+    print("---")
+    if r["top_projects_week"]:
+        print("Top projects (7 days)")
+        for cwd, cost in r["top_projects_week"]:
+            name = Path(cwd).name or cwd
+            print(f"  {fmt(cost):>8}  {name}")
+
+    if r["top_projects_all"]:
+        print("---")
+        print("Top projects (all time)")
+        for cwd, cost in r["top_projects_all"]:
+            name = Path(cwd).name or cwd
+            print(f"  {fmt(cost):>8}  {name}")
+
     print("---")
     print(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)")
     if r["since"]:
