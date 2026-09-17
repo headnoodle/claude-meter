@@ -172,6 +172,16 @@ def report(db: sqlite3.Connection) -> dict:
         "by_day":      db.execute(
             "SELECT day, ROUND(SUM(cost),2) FROM requests GROUP BY day ORDER BY day DESC LIMIT 7"
         ).fetchall(),
+        # Monthly rollups
+        "month_rows": db.execute("""
+            SELECT strftime('%Y-%m', day) AS month,
+                   ROUND(SUM(cost), 2),
+                   COUNT(*)
+            FROM requests
+            GROUP BY month
+            ORDER BY month DESC
+            LIMIT 6
+        """).fetchall(),
         # Model breakdown for today and all time
         "models_today": db.execute("""
             SELECT model, ROUND(SUM(cost),2), COUNT(*)
@@ -263,7 +273,9 @@ def main() -> None:
     burn         = r["burn_rate"]
     burn_str     = f" · {fmt(burn)}/hr" if burn >= 0.01 else ""
     alert_str    = " ⚠️" if over_budget else ""
-    print(f"🤖 {fmt(r['today_cost'])} today{burn_str}{alert_str}")
+    this_month   = date.today().strftime("%Y-%m")
+    month_cost   = next((c for m, c, _ in r["month_rows"] if m == this_month), 0.0)
+    print(f"🤖 {fmt(r['today_cost'])} today  |  {fmt(month_cost)} this month{burn_str}{alert_str}")
     print("---")
     budget_line = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
     print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}")
@@ -306,6 +318,13 @@ def main() -> None:
         for model, cost, reqs in r["models_all"]:
             short = _short_model(model)
             print(f"  {fmt(cost):>8}  {short}  ({reqs} reqs)")
+
+    if r["month_rows"]:
+        print("---")
+        print("Monthly")
+        for month, cost, reqs in r["month_rows"]:
+            marker = " ◀" if month == this_month else ""
+            print(f"  {month}  {fmt(cost):>8}  ({reqs} reqs){marker}")
 
     print("---")
     print(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)")
