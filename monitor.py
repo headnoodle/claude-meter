@@ -2,30 +2,23 @@
 """
 claude-meter — tracks Claude Code API spend per request using local JSONL transcripts.
 
-Persists every request to ~/.claude-meter.db so data survives the ~30-day
-transcript rotation Claude Code applies to ~/.claude/projects.
-
-Designed to be called by xbar every minute; outputs xbar menu format.
+Runs as a persistent macOS menu bar app via rumps.
+Start on login with: brew services start claude-meter
 """
 
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
 
-VERSION      = "0.1.0"
+import rumps
 
-CLAUDE_DIR   = Path.home() / ".claude" / "projects"
-DB_PATH      = Path.home() / ".claude-meter.db"
-
-# Daily spend threshold for macOS notifications.
-# Configurable via xbar Settings (right-click the menu bar item).
-# Falls back to this value when run outside xbar. Set to 0 to disable.
-DAILY_BUDGET = float(os.environ.get("CLAUDE_METER_DAILY_BUDGET", 50.0))
+VERSION     = "0.2.0"
+CLAUDE_DIR  = Path.home() / ".claude" / "projects"
+DB_PATH     = Path.home() / ".claude-meter.db"
+CONFIG_PATH = Path.home() / ".claude-meter.conf"
 
 PRICING = {
     "claude-sonnet-4-6":         {"i": 3.0,  "o": 15.0, "cw": 3.75, "cr": 0.30},
@@ -36,6 +29,30 @@ PRICING = {
     "<synthetic>":               {"i": 0.0,  "o": 0.0,  "cw": 0.0,  "cr": 0.0 },
 }
 DEFAULT_P = {"i": 3.0, "o": 15.0, "cw": 3.75, "cr": 0.30}
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        try:
+            return json.loads(CONFIG_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_config(cfg: dict) -> None:
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+
+def get_budget() -> float:
+    cfg = load_config()
+    if "daily_budget" in cfg:
+        return float(cfg["daily_budget"])
+    return float(os.environ.get("CLAUDE_METER_DAILY_BUDGET", 50.0))
 
 
 # ---------------------------------------------------------------------------
@@ -54,24 +71,19 @@ def open_db() -> sqlite3.Connection:
         )
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_day ON requests(day)")
-    # cwd added in v5.1 — add column to existing databases that predate it
     cols = {row[1] for row in db.execute("PRAGMA table_info(requests)")}
-    if "cwd" not in cols:
-        db.execute("ALTER TABLE requests ADD COLUMN cwd TEXT")
-    if "thinking_cost" not in cols:
-        db.execute("ALTER TABLE requests ADD COLUMN thinking_cost REAL DEFAULT 0")
-    if "cache_read_tokens" not in cols:
-        db.execute("ALTER TABLE requests ADD COLUMN cache_read_tokens INTEGER DEFAULT 0")
-    if "cache_total_tokens" not in cols:
-        db.execute("ALTER TABLE requests ADD COLUMN cache_total_tokens INTEGER DEFAULT 0")
-    if "cache_savings" not in cols:
-        db.execute("ALTER TABLE requests ADD COLUMN cache_savings REAL DEFAULT 0")
-    if "git_branch" not in cols:
-        db.execute("ALTER TABLE requests ADD COLUMN git_branch TEXT DEFAULT ''")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_cwd ON requests(cwd)")
+    for col, defn in [
+        ("cwd",                "TEXT"),
+        ("thinking_cost",      "REAL DEFAULT 0"),
+        ("cache_read_tokens",  "INTEGER DEFAULT 0"),
+        ("cache_total_tokens", "INTEGER DEFAULT 0"),
+        ("cache_savings",      "REAL DEFAULT 0"),
+        ("git_branch",         "TEXT DEFAULT ''"),
+    ]:
+        if col not in cols:
+            db.execute(f"ALTER TABLE requests ADD COLUMN {col} {defn}")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_cwd    ON requests(cwd)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_branch ON requests(git_branch)")
-    # Tracks which budget thresholds have already triggered a notification,
-    # keyed by (day, threshold) so each crossing fires exactly once.
     db.execute("""
         CREATE TABLE IF NOT EXISTS budget_alerts (
             day        TEXT NOT NULL,
@@ -104,7 +116,6 @@ def thinking_cost(usage: dict, model: str) -> float:
 
 
 def ingest(db: sqlite3.Connection) -> None:
-    """Walk JSONL transcripts and upsert every assistant request into the DB."""
     if not CLAUDE_DIR.exists():
         return
 
@@ -179,109 +190,75 @@ def ingest(db: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def report(db: sqlite3.Connection) -> dict:
-    today        = date.today().isoformat()
-    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    today          = date.today().isoformat()
+    one_hour_ago   = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
     seven_days_ago = (date.today() - timedelta(days=7)).isoformat()
 
-    # Average daily spend over the last 7 complete days (excludes today)
     prev_days = db.execute("""
-        SELECT day, SUM(cost)
-        FROM requests
-        WHERE day >= ? AND day < ?
-        GROUP BY day
+        SELECT day, SUM(cost) FROM requests
+        WHERE day >= ? AND day < ? GROUP BY day
     """, (seven_days_ago, today)).fetchall()
-    avg_daily = (sum(c for _, c in prev_days) / len(prev_days)) if prev_days else 0.0
-
+    avg_daily  = (sum(c for _, c in prev_days) / len(prev_days)) if prev_days else 0.0
     today_cost = db.execute("SELECT COALESCE(SUM(cost),0) FROM requests WHERE day=?", (today,)).fetchone()[0]
-
-    if avg_daily > 0:
-        pct = (today_cost - avg_daily) / avg_daily * 100
-    else:
-        pct = None
+    pct        = ((today_cost - avg_daily) / avg_daily * 100) if avg_daily > 0 else None
 
     return {
-        "today_cost":       today_cost,
-        "today_thinking":   db.execute("SELECT COALESCE(SUM(thinking_cost),0) FROM requests WHERE day=?", (today,)).fetchone()[0],
-        "today_reqs":       db.execute("SELECT COUNT(*) FROM requests WHERE day=?", (today,)).fetchone()[0],
-        "burn_rate":   db.execute(
-            "SELECT COALESCE(SUM(cost),0) FROM requests WHERE ts >= ?", (one_hour_ago,)
-        ).fetchone()[0],
-        "avg_daily":   avg_daily,
-        "trend_pct":   pct,
-        "all_cost":    db.execute("SELECT COALESCE(SUM(cost),0) FROM requests").fetchone()[0],
-        "all_reqs":    db.execute("SELECT COUNT(*) FROM requests").fetchone()[0],
-        "since":       db.execute("SELECT MIN(day) FROM requests").fetchone()[0],
-        "by_day":      db.execute(
-            "SELECT day, ROUND(SUM(cost),2) FROM requests GROUP BY day ORDER BY day DESC LIMIT 7"
-        ).fetchall(),
-        # Monthly rollups
-        "month_rows": db.execute("""
-            SELECT strftime('%Y-%m', day) AS month,
-                   ROUND(SUM(cost), 2),
-                   COUNT(*)
-            FROM requests
-            GROUP BY month
-            ORDER BY month DESC
-            LIMIT 6
+        "today_cost":        today_cost,
+        "today_thinking":    db.execute("SELECT COALESCE(SUM(thinking_cost),0) FROM requests WHERE day=?", (today,)).fetchone()[0],
+        "today_reqs":        db.execute("SELECT COUNT(*) FROM requests WHERE day=?", (today,)).fetchone()[0],
+        "burn_rate":         db.execute("SELECT COALESCE(SUM(cost),0) FROM requests WHERE ts >= ?", (one_hour_ago,)).fetchone()[0],
+        "avg_daily":         avg_daily,
+        "trend_pct":         pct,
+        "all_cost":          db.execute("SELECT COALESCE(SUM(cost),0) FROM requests").fetchone()[0],
+        "all_reqs":          db.execute("SELECT COUNT(*) FROM requests").fetchone()[0],
+        "since":             db.execute("SELECT MIN(day) FROM requests").fetchone()[0],
+        "by_day":            db.execute("SELECT day, ROUND(SUM(cost),2) FROM requests GROUP BY day ORDER BY day DESC LIMIT 7").fetchall(),
+        "month_rows":        db.execute("""
+            SELECT strftime('%Y-%m', day) AS month, ROUND(SUM(cost),2), COUNT(*)
+            FROM requests GROUP BY month ORDER BY month DESC LIMIT 6
         """).fetchall(),
-        # Model breakdown for today and all time
-        "models_today": db.execute("""
+        "models_today":      db.execute("""
             SELECT model, ROUND(SUM(cost),2), COUNT(*), ROUND(SUM(thinking_cost),2)
             FROM requests WHERE day=? AND model != '' AND model != '<synthetic>'
             GROUP BY model ORDER BY SUM(cost) DESC
         """, (today,)).fetchall(),
-        "models_all": db.execute("""
+        "models_all":        db.execute("""
             SELECT model, ROUND(SUM(cost),2), COUNT(*), ROUND(SUM(thinking_cost),2)
             FROM requests WHERE model != '' AND model != '<synthetic>'
             GROUP BY model ORDER BY SUM(cost) DESC
         """).fetchall(),
-        # Cache stats for today
-        "cache_today": db.execute("""
+        "cache_today":       db.execute("""
             SELECT COALESCE(SUM(cache_read_tokens),0),
                    COALESCE(SUM(cache_total_tokens),0),
                    COALESCE(SUM(cache_savings),0)
             FROM requests WHERE day=?
         """, (today,)).fetchone(),
-        # Branch breakdown
         "top_branches_week": db.execute("""
-            SELECT git_branch, ROUND(SUM(cost),2)
-            FROM requests
+            SELECT git_branch, ROUND(SUM(cost),2) FROM requests
             WHERE day >= ? AND git_branch != '' AND git_branch IS NOT NULL
             GROUP BY git_branch ORDER BY SUM(cost) DESC LIMIT 7
         """, (seven_days_ago,)).fetchall(),
-        "top_branches_all": db.execute("""
-            SELECT git_branch, ROUND(SUM(cost),2)
-            FROM requests
+        "top_branches_all":  db.execute("""
+            SELECT git_branch, ROUND(SUM(cost),2) FROM requests
             WHERE git_branch != '' AND git_branch IS NOT NULL
             GROUP BY git_branch ORDER BY SUM(cost) DESC LIMIT 7
         """).fetchall(),
-        # Top projects by cost this week and all time, excluding blanks
         "top_projects_week": db.execute("""
-            SELECT cwd, ROUND(SUM(cost),2) AS total
-            FROM requests
-            WHERE day >= ? AND cwd != ''
-            GROUP BY cwd ORDER BY total DESC LIMIT 5
+            SELECT cwd, ROUND(SUM(cost),2) AS total FROM requests
+            WHERE day >= ? AND cwd != '' GROUP BY cwd ORDER BY total DESC LIMIT 5
         """, (seven_days_ago,)).fetchall(),
-        "top_projects_all": db.execute("""
-            SELECT cwd, ROUND(SUM(cost),2) AS total
-            FROM requests
-            WHERE cwd != ''
-            GROUP BY cwd ORDER BY total DESC LIMIT 5
+        "top_projects_all":  db.execute("""
+            SELECT cwd, ROUND(SUM(cost),2) AS total FROM requests
+            WHERE cwd != '' GROUP BY cwd ORDER BY total DESC LIMIT 5
         """).fetchall(),
     }
 
 
 # ---------------------------------------------------------------------------
-# Current session
+# Active sessions
 # ---------------------------------------------------------------------------
 
 def active_sessions(db: sqlite3.Connection) -> list:
-    """Sessions with JSONL files modified today.
-
-    Session total comes from reading the JSONL directly (may span multiple days).
-    Today cost comes from the DB so it is always consistent with the main Today total.
-    Multiple files sharing the same cwd are merged into one row.
-    """
     if not CLAUDE_DIR.exists():
         return []
 
@@ -308,7 +285,7 @@ def active_sessions(db: sqlite3.Connection) -> list:
                     if d.get("type") != "assistant":
                         continue
                     msg = d.get("message", {})
-                    u = msg.get("usage", {})
+                    u   = msg.get("usage", {})
                     if not u or "input_tokens" not in u:
                         continue
                     total_cost += request_cost(u, msg.get("model", ""))
@@ -327,7 +304,6 @@ def active_sessions(db: sqlite3.Connection) -> list:
 
     results = []
     for cwd, sess in session_by_cwd.items():
-        # today cost from DB — guaranteed consistent with the main Today line
         today_cost, today_reqs = db.execute(
             "SELECT COALESCE(SUM(cost),0), COUNT(*) FROM requests WHERE day=? AND cwd=?",
             (today, cwd),
@@ -349,27 +325,18 @@ def active_sessions(db: sqlite3.Connection) -> list:
 # Budget alerts
 # ---------------------------------------------------------------------------
 
-def check_budget(db: sqlite3.Connection, today_cost: float) -> None:
-    """Fire a macOS notification when today's spend crosses 50%, 75%, or 100% of budget.
-
-    Only the highest newly-crossed threshold fires. All lower thresholds are
-    simultaneously marked as fired so they never fire in a later refresh.
-    """
-    if DAILY_BUDGET <= 0:
+def check_budget(db: sqlite3.Connection, today_cost: float, daily_budget: float) -> None:
+    if daily_budget <= 0:
         return
 
     today  = date.today().isoformat()
     levels = [
-        (DAILY_BUDGET * 0.50, "50%",  "Halfway through daily budget"),
-        (DAILY_BUDGET * 0.75, "75%",  "75% of daily budget used"),
-        (DAILY_BUDGET * 1.00, "100%", "Daily budget reached"),
+        (daily_budget * 0.50, "50%",  "Halfway through daily budget"),
+        (daily_budget * 0.75, "75%",  "75% of daily budget used"),
+        (daily_budget * 1.00, "100%", "Daily budget reached"),
     ]
+    fired = {row[0] for row in db.execute("SELECT threshold FROM budget_alerts WHERE day=?", (today,))}
 
-    fired = {row[0] for row in db.execute(
-        "SELECT threshold FROM budget_alerts WHERE day=?", (today,)
-    )}
-
-    # Highest threshold crossed that hasn't fired yet
     to_fire = None
     for amount, label, subtitle in reversed(levels):
         if today_cost >= amount and amount not in fired:
@@ -380,84 +347,44 @@ def check_budget(db: sqlite3.Connection, today_cost: float) -> None:
         return
 
     fire_amount, label, subtitle = to_fire
-
-    # Mark this level and every lower one as fired so they never trigger later
     for amount, _, _ in levels:
         if amount <= fire_amount:
-            db.execute(
-                "INSERT OR IGNORE INTO budget_alerts (day, threshold) VALUES (?,?)",
-                (today, amount),
-            )
+            db.execute("INSERT OR IGNORE INTO budget_alerts (day, threshold) VALUES (?,?)", (today, amount))
     db.commit()
 
-    subprocess.run([
-        "osascript", "-e",
-        f'display notification "Spent {fmt(today_cost)} today ({label} of {fmt(DAILY_BUDGET)} budget)" '
-        f'with title "claude-meter" subtitle "{subtitle}" sound name "Basso"',
-    ], check=False)
+    rumps.notification(
+        title="claude-meter",
+        subtitle=subtitle,
+        message=f"Spent {fmt(today_cost)} today ({label} of {fmt(daily_budget)} budget)",
+        sound=True,
+    )
 
 
 # ---------------------------------------------------------------------------
-# xbar output
+# Formatting helpers
 # ---------------------------------------------------------------------------
 
 def fmt(v: float) -> str:
     return f"${v:.2f}"
 
 
-def sparkline(values: list, today_color: str = "") -> str:
-    """Map a list of floats to Unicode block chars (oldest → newest, left → right).
-
-    today_color: hex string like '#ffa94d' — colours the last (today) bar differently.
-    Requires ansi=true in the xbar line params.
-    """
+def sparkline(values: list) -> str:
     blocks = "▁▂▃▄▅▆▇█"
     if not values:
         return ""
     max_v = max(values) or 1
-    chars = [blocks[min(7, int(v / max_v * 7.999))] for v in values]
-    if today_color and chars:
-        r = int(today_color[1:3], 16)
-        g = int(today_color[3:5], 16)
-        b = int(today_color[5:7], 16)
-        chars[-1] = f"\x1b[38;2;{r};{g};{b}m{chars[-1]}\x1b[0m"
-    return "".join(chars)
+    return "".join(blocks[min(7, int(v / max_v * 7.999))] for v in values)
 
 
-def budget_bar(current: float, limit: float, width: int = 20) -> str:
-    """Return a filled block bar and a color hint based on how close to the limit."""
-    pct   = min(1.0, current / limit) if limit > 0 else 0
+def budget_bar(current: float, limit: float, width: int = 20) -> tuple:
+    pct    = min(1.0, current / limit) if limit > 0 else 0
     filled = round(pct * width)
-    bar   = "█" * filled + "░" * (width - filled)
-    if pct >= 0.85:
-        color = "#ff6b6b"
-    elif pct >= 0.6:
-        color = "#ffa94d"
-    else:
-        color = "#51cf66"
-    return bar, color
+    return "█" * filled + "░" * (width - filled), pct
 
 
-def _short_model(model: str) -> str:
-    """Collapse verbose model IDs to a readable short name."""
-    m = model.lower()
-    if "fable"    in m: return "Fable 5"
-    if "opus-5"   in m: return "Opus 5"
-    if "opus-4-8" in m: return "Opus 4.8"
-    if "opus-4"   in m: return "Opus 4"
-    if "sonnet-5" in m: return "Sonnet 5"
-    if "sonnet-4-6" in m: return "Sonnet 4.6"
-    if "sonnet-4" in m: return "Sonnet 4"
-    if "haiku-4-5" in m: return "Haiku 4.5"
-    if "haiku"    in m: return "Haiku"
-    return model
-
-
-def _model_color(model: str) -> str:
-    m = model.lower()
-    if "opus"  in m: return "#ff6b6b"
-    if "haiku" in m: return "#51cf66"
-    return "#ffa94d"  # Sonnet / default
+def cache_bar(hit_rate: float, width: int = 20) -> str:
+    filled = round(hit_rate * width)
+    return "█" * filled + "░" * (width - filled)
 
 
 def model_bar(cost: float, total: float, width: int = 16) -> str:
@@ -466,173 +393,224 @@ def model_bar(cost: float, total: float, width: int = 16) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def cache_bar(hit_rate: float, width: int = 20) -> tuple:
-    filled = round(hit_rate * width)
-    bar    = "█" * filled + "░" * (width - filled)
-    if hit_rate >= 0.70:
-        color = "#51cf66"
-    elif hit_rate >= 0.40:
-        color = "#ffa94d"
-    else:
-        color = "#ff6b6b"
-    return bar, color
+def _short_model(model: str) -> str:
+    m = model.lower()
+    if "fable"      in m: return "Fable 5"
+    if "opus-5"     in m: return "Opus 5"
+    if "opus-4-8"   in m: return "Opus 4.8"
+    if "opus-4"     in m: return "Opus 4"
+    if "sonnet-5"   in m: return "Sonnet 5"
+    if "sonnet-4-6" in m: return "Sonnet 4.6"
+    if "sonnet-4"   in m: return "Sonnet 4"
+    if "haiku-4-5"  in m: return "Haiku 4.5"
+    if "haiku"      in m: return "Haiku"
+    return model
 
 
-def main() -> None:
-    db = open_db()
-    ingest(db)
-    r        = report(db)
-    sessions = active_sessions(db)
-    check_budget(db, r["today_cost"])
-    db.close()
+def _mi(title: str) -> rumps.MenuItem:
+    return rumps.MenuItem(title)
 
-    over_budget = DAILY_BUDGET > 0 and r["today_cost"] >= DAILY_BUDGET
-    burn        = r["burn_rate"]
-    burn_str    = f" · {fmt(burn)}/hr" if burn >= 0.01 else ""
-    alert_str   = " ⚠️" if over_budget else ""
-    this_month  = date.today().strftime("%Y-%m")
-    month_cost  = next((c for m, c, _ in r["month_rows"] if m == this_month), 0.0)
 
-    # ── Title bar ────────────────────────────────────────────────────────────
-    print(f"🤖 {fmt(r['today_cost'])} today  ·  {fmt(month_cost)} this month{burn_str}{alert_str}")
-    print("---")
+# ---------------------------------------------------------------------------
+# Menu bar app
+# ---------------------------------------------------------------------------
 
-    # ── Today summary ────────────────────────────────────────────────────────
-    budget_line   = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
-    today_color   = " | color=#ff6b6b" if over_budget else ""
-    thinking_str  = f"  · ↯ {fmt(r['today_thinking'])} thinking" if r["today_thinking"] >= 0.01 else ""
-    print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){thinking_str}{budget_line}{today_color}")
+class ClaudeMeterApp(rumps.App):
+    def __init__(self):
+        super().__init__("🤖", quit_button=rumps.MenuItem("Quit claude-meter"))
+        self._refresh(None)
 
-    if DAILY_BUDGET > 0:
-        bar, bar_color = budget_bar(r["today_cost"], DAILY_BUDGET)
-        pct_num = min(100, r["today_cost"] / DAILY_BUDGET * 100)
-        print(f"{bar}  {pct_num:.0f}% of {fmt(DAILY_BUDGET)} | color={bar_color} font=Menlo size=11")
+    @rumps.timer(60)
+    def _refresh(self, _):
+        try:
+            budget   = get_budget()
+            db       = open_db()
+            ingest(db)
+            r        = report(db)
+            sessions = active_sessions(db)
+            check_budget(db, r["today_cost"], budget)
+            db.close()
+            self._build(r, sessions, budget)
+        except Exception as exc:
+            self.title = "🤖 !"
+            self.menu.clear()
+            self.menu.add(rumps.MenuItem(f"Error: {exc}"))
 
-    burn_color = " | color=#ffa94d" if burn >= 0.01 else ""
-    print(f"Burn rate: {fmt(burn)}/hr  (rolling 1h){burn_color}")
+    def _build(self, r: dict, sessions: list, budget: float) -> None:
+        this_month  = date.today().strftime("%Y-%m")
+        month_cost  = next((c for m, c, _ in r["month_rows"] if m == this_month), 0.0)
+        over_budget = budget > 0 and r["today_cost"] >= budget
+        burn        = r["burn_rate"]
 
-    pct = r["trend_pct"]
-    if pct is not None:
-        arrow       = "▲" if pct >= 0 else "▼"
-        trend_color = " | color=#ff6b6b" if pct >= 0 else " | color=#51cf66"
-        print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day){trend_color}")
+        self.title = f"🤖 {fmt(r['today_cost'])}{'  ⚠️' if over_budget else ''}"
 
-    # Cache hit rate bar
-    cr_tok, ct_tok, c_saved = r["cache_today"]
-    if ct_tok > 0:
-        hit_rate = cr_tok / ct_tok
-        bar, color = cache_bar(hit_rate)
-        print(f"Cache  {bar}  {hit_rate*100:.0f}% hit  · saved {fmt(c_saved)} | color={color} font=Menlo size=11")
+        items = []
 
-    # Sparkline: by_day is DESC, reverse for left=oldest right=newest
-    day_costs = [c for _, c in reversed(r["by_day"])]
-    if len(day_costs) > 1:
-        today_hl = bar_color if DAILY_BUDGET > 0 else "#ffa94d"
-        spark = sparkline(day_costs, today_color=today_hl)
-        print(f"Week  {spark} | font=Menlo size=13 ansi=true")
+        # Today summary
+        budget_str = f"  (budget: {fmt(budget)})" if budget > 0 else ""
+        think_str  = f"  · ↯ {fmt(r['today_thinking'])} thinking" if r["today_thinking"] >= 0.01 else ""
+        items.append(_mi(f"Today:  {fmt(r['today_cost'])} ({r['today_reqs']} reqs){think_str}{budget_str}"))
+        items.append(_mi(f"Month:  {fmt(month_cost)}"))
 
-    # ── Active sessions ───────────────────────────────────────────────────────
-    if sessions:
-        print("---")
-        print(f"{'Sessions':<24}{'today':>9}  {'session':>9} | font=Menlo size=11 color=#868e96")
-        for s in sessions:
-            name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
-            print(f"{name:<24}{fmt(s['today_cost']):>9}  {fmt(s['total_cost']):>9} | font=Menlo size=11")
+        if budget > 0:
+            bar, pct_n = budget_bar(r["today_cost"], budget)
+            items.append(_mi(f"{bar}  {pct_n*100:.0f}% of {fmt(budget)}"))
 
-    # ── Models today (visible — short and useful) ─────────────────────────────
-    if r["models_today"]:
-        print("---")
-        print("Models today | color=#868e96")
-        total_today_cost = sum(c for _, c, _, _ in r["models_today"])
-        for model, cost, reqs, think in r["models_today"]:
-            short     = _short_model(model)
-            bar       = model_bar(cost, total_today_cost)
-            pct       = int(cost / total_today_cost * 100) if total_today_cost else 0
-            color     = _model_color(model)
-            think_str = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
-            print(f"{short:<12} {bar}  {pct:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_str} | font=Menlo size=11 color={color}")
+        items.append(_mi(f"Burn rate:  {fmt(burn)}/hr  (rolling 1h)"))
 
-    # ── Last 7 days (submenu) ─────────────────────────────────────────────────
-    print("---")
-    print("Last 7 days | color=#868e96")
-    for day, cost in r["by_day"]:
-        marker = " ◀" if day == date.today().isoformat() else ""
-        print(f"-- {day}  {fmt(cost)}{marker}")
+        if r["trend_pct"] is not None:
+            pct   = r["trend_pct"]
+            arrow = "▲" if pct >= 0 else "▼"
+            items.append(_mi(f"Trend:  {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)"))
 
-    # ── Top projects (submenu, 7 days and all time nested) ────────────────────
-    if r["top_projects_week"] or r["top_projects_all"]:
-        print("---")
-        print("Top projects | color=#868e96")
-        if r["top_projects_week"]:
-            print("-- 7 days | color=#868e96")
-            total_week = sum(c for _, c in r["top_projects_week"])
-            for cwd, cost in r["top_projects_week"]:
-                name = (Path(cwd).name or cwd)[:14]
-                bar  = model_bar(cost, total_week)
-                pct  = int(cost / total_week * 100) if total_week else 0
-                print(f"---- {name:<14} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
-        if r["top_projects_all"]:
-            print("-- All time | color=#868e96")
-            total_all = sum(c for _, c in r["top_projects_all"])
-            for cwd, cost in r["top_projects_all"]:
-                name = (Path(cwd).name or cwd)[:14]
-                bar  = model_bar(cost, total_all)
-                pct  = int(cost / total_all * 100) if total_all else 0
-                print(f"---- {name:<14} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
+        cr_tok, ct_tok, c_saved = r["cache_today"]
+        if ct_tok > 0:
+            hit_rate = cr_tok / ct_tok
+            bar      = cache_bar(hit_rate)
+            items.append(_mi(f"Cache  {bar}  {hit_rate*100:.0f}% hit · saved {fmt(c_saved)}"))
 
-    # ── Top branches (submenu) ───────────────────────────────────────────────
-    if r["top_branches_week"] or r["top_branches_all"]:
-        print("---")
-        print("Top branches | color=#868e96")
-        if r["top_branches_week"]:
-            print("-- 7 days | color=#868e96")
-            total = sum(c for _, c in r["top_branches_week"])
-            for branch, cost in r["top_branches_week"]:
-                name = branch[:22]
-                bar  = model_bar(cost, total)
-                pct  = int(cost / total * 100) if total else 0
-                print(f"---- {name:<22} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
-        if r["top_branches_all"]:
-            print("-- All time | color=#868e96")
-            total = sum(c for _, c in r["top_branches_all"])
-            for branch, cost in r["top_branches_all"]:
-                name = branch[:22]
-                bar  = model_bar(cost, total)
-                pct  = int(cost / total * 100) if total else 0
-                print(f"---- {name:<22} {bar}  {pct:>3}%  {fmt(cost):>8} | font=Menlo size=11")
+        day_costs = [c for _, c in reversed(r["by_day"])]
+        if len(day_costs) > 1:
+            items.append(_mi(f"Week   {sparkline(day_costs)}"))
 
-    # ── Models all time (submenu) ─────────────────────────────────────────────
-    if r["models_all"]:
-        print("---")
-        print("Models (all time) | color=#868e96")
-        total_all_cost = sum(c for _, c, _, _ in r["models_all"])
-        for model, cost, reqs, think in r["models_all"]:
-            short     = _short_model(model)
-            bar       = model_bar(cost, total_all_cost)
-            pct       = int(cost / total_all_cost * 100) if total_all_cost else 0
-            color     = _model_color(model)
-            think_str = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
-            print(f"-- {short:<12} {bar}  {pct:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_str} | font=Menlo size=11 color={color}")
+        # Sessions
+        if sessions:
+            items.append(None)
+            hdr = _mi(f"{'Sessions':<24}{'today':>9}  {'session':>9}")
+            for s in sessions:
+                name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
+                hdr.add(_mi(f"{name:<24}{fmt(s['today_cost']):>9}  {fmt(s['total_cost']):>9}"))
+            items.append(hdr)
 
-    # ── Monthly (submenu) ─────────────────────────────────────────────────────
-    if r["month_rows"]:
-        print("---")
-        print("Monthly | color=#868e96")
-        for month, cost, reqs in r["month_rows"]:
-            marker = " ◀" if month == this_month else ""
-            print(f"-- {month}  {fmt(cost):>8}  ({reqs} reqs){marker}")
+        # Models today
+        if r["models_today"]:
+            items.append(None)
+            mod_item    = _mi("Models today")
+            total_today = sum(c for _, c, _, _ in r["models_today"])
+            for model, cost, reqs, think in r["models_today"]:
+                short   = _short_model(model)
+                bar     = model_bar(cost, total_today)
+                pct_m   = int(cost / total_today * 100) if total_today else 0
+                think_s = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
+                mod_item.add(_mi(f"{short:<12} {bar}  {pct_m:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_s}"))
+            items.append(mod_item)
 
-    # ── Footer ────────────────────────────────────────────────────────────────
-    print("---")
-    print(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)")
-    if r["since"]:
-        print(f"Tracked since: {r['since']}")
-    print("---")
-    print(f"DB: {DB_PATH}")
+        # Last 7 days
+        items.append(None)
+        days_item = _mi("Last 7 days")
+        for day, cost in r["by_day"]:
+            marker = " ◀" if day == date.today().isoformat() else ""
+            days_item.add(_mi(f"{day}  {fmt(cost)}{marker}"))
+        items.append(days_item)
+
+        # Top projects
+        if r["top_projects_week"] or r["top_projects_all"]:
+            proj_item = _mi("Top projects")
+            if r["top_projects_week"]:
+                week_sub = _mi("7 days")
+                total    = sum(c for _, c in r["top_projects_week"])
+                for cwd, cost in r["top_projects_week"]:
+                    name  = (Path(cwd).name or cwd)[:14]
+                    bar   = model_bar(cost, total)
+                    pct_p = int(cost / total * 100) if total else 0
+                    week_sub.add(_mi(f"{name:<14} {bar}  {pct_p:>3}%  {fmt(cost):>8}"))
+                proj_item.add(week_sub)
+            if r["top_projects_all"]:
+                all_sub = _mi("All time")
+                total   = sum(c for _, c in r["top_projects_all"])
+                for cwd, cost in r["top_projects_all"]:
+                    name  = (Path(cwd).name or cwd)[:14]
+                    bar   = model_bar(cost, total)
+                    pct_p = int(cost / total * 100) if total else 0
+                    all_sub.add(_mi(f"{name:<14} {bar}  {pct_p:>3}%  {fmt(cost):>8}"))
+                proj_item.add(all_sub)
+            items.append(proj_item)
+
+        # Top branches
+        if r["top_branches_week"] or r["top_branches_all"]:
+            br_item = _mi("Top branches")
+            if r["top_branches_week"]:
+                week_sub = _mi("7 days")
+                total    = sum(c for _, c in r["top_branches_week"])
+                for branch, cost in r["top_branches_week"]:
+                    bar   = model_bar(cost, total)
+                    pct_b = int(cost / total * 100) if total else 0
+                    week_sub.add(_mi(f"{branch[:22]:<22} {bar}  {pct_b:>3}%  {fmt(cost):>8}"))
+                br_item.add(week_sub)
+            if r["top_branches_all"]:
+                all_sub = _mi("All time")
+                total   = sum(c for _, c in r["top_branches_all"])
+                for branch, cost in r["top_branches_all"]:
+                    bar   = model_bar(cost, total)
+                    pct_b = int(cost / total * 100) if total else 0
+                    all_sub.add(_mi(f"{branch[:22]:<22} {bar}  {pct_b:>3}%  {fmt(cost):>8}"))
+                br_item.add(all_sub)
+            items.append(br_item)
+
+        # Models all time
+        if r["models_all"]:
+            mod_all   = _mi("Models (all time)")
+            total_all = sum(c for _, c, _, _ in r["models_all"])
+            for model, cost, reqs, think in r["models_all"]:
+                short   = _short_model(model)
+                bar     = model_bar(cost, total_all)
+                pct_m   = int(cost / total_all * 100) if total_all else 0
+                think_s = f"  ↯ {fmt(think)}" if think >= 0.01 else ""
+                mod_all.add(_mi(f"{short:<12} {bar}  {pct_m:>3}%  {fmt(cost):>8}  ({reqs} reqs){think_s}"))
+            items.append(mod_all)
+
+        # Monthly
+        if r["month_rows"]:
+            monthly = _mi("Monthly")
+            for month, cost, reqs in r["month_rows"]:
+                marker = " ◀" if month == this_month else ""
+                monthly.add(_mi(f"{month}  {fmt(cost):>8}  ({reqs} reqs){marker}"))
+            items.append(monthly)
+
+        # Preferences
+        items.append(None)
+        prefs = _mi("Preferences")
+        prefs.add(rumps.MenuItem(f"Daily Budget: {fmt(budget)}", callback=None))
+        prefs.add(rumps.MenuItem("Set Budget…", callback=self._set_budget))
+        items.append(prefs)
+
+        # Footer
+        items.append(None)
+        items.append(_mi(f"All time: {fmt(r['all_cost'])} ({r['all_reqs']} requests)"))
+        if r["since"]:
+            items.append(_mi(f"Tracked since: {r['since']}"))
+        items.append(None)
+        items.append(_mi(f"DB: {DB_PATH}"))
+
+        self.menu.clear()
+        for item in items:
+            self.menu.add(rumps.separator if item is None else item)
+
+    def _set_budget(self, _) -> None:
+        budget = get_budget()
+        disp   = str(int(budget)) if budget == int(budget) else str(budget)
+        w      = rumps.Window(
+            message="Enter daily budget in USD (0 to disable alerts):",
+            title="Set Daily Budget",
+            default_text=disp,
+            ok="Save",
+            cancel="Cancel",
+            dimensions=(200, 20),
+        )
+        response = w.run()
+        if response.clicked:
+            try:
+                new_budget = float(response.text.strip().lstrip("$"))
+                cfg = load_config()
+                cfg["daily_budget"] = new_budget
+                save_config(cfg)
+                self._refresh(None)
+            except ValueError:
+                rumps.alert("Invalid budget — please enter a number.")
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v"):
         print(f"claude-meter {VERSION}")
         sys.exit(0)
-    main()
+    ClaudeMeterApp().run()

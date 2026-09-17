@@ -1,15 +1,26 @@
 # claude-meter — Claude Code Guidance
 
-Single-file Python tool (`monitor.py`) with a thin xbar wrapper. No build step, no dependencies beyond the standard library.
+Single-file Python menu bar app (`monitor.py`) using `rumps`. No build step beyond `pip install rumps`.
 
 ## Key facts
 
-- **Version**: defined as `VERSION` constant in `monitor.py` — bump it and the xbar plugin `<xbar.version>` tag together
+- **Version**: defined as `VERSION` constant in `monitor.py` — bump it and the formula `url`/`sha256` together when releasing
 - **Data source**: `~/.claude/projects/**/*.jsonl` — read-only, never written to
 - **Database**: `~/.claude-meter.db` — SQLite, lives outside the repo
+- **Config**: `~/.claude-meter.conf` — JSON, written by the "Set Budget…" menu item
 - **Schema**: `requests (request_id PK, ts, day, model, cost, thinking_cost, cache_read_tokens, cache_total_tokens, cache_savings, git_branch, cwd)`
 - **Pricing**: `PRICING` dict in `monitor.py` — keys are exact model ID strings as they appear in the JSONL `message.model` field
-- **xbar contract**: `monitor.py` must print a valid xbar menu to stdout; first line = menu bar title, `---` = separator, `--` prefix = submenu item, `----` = nested submenu
+- **Refresh**: `@rumps.timer(60)` fires `_refresh` every 60 seconds; also called once in `__init__`
+
+## Architecture
+
+```
+ClaudeMeterApp(rumps.App)
+  __init__          → calls _refresh(None) for immediate first render
+  _refresh (timer)  → open_db → ingest → report → active_sessions → check_budget → _build
+  _build            → clears self.menu and rebuilds from report data
+  _set_budget       → rumps.Window dialog → saves to ~/.claude-meter.conf
+```
 
 ## Common tasks
 
@@ -29,27 +40,22 @@ sqlite3 ~/.claude-meter.db "SELECT DISTINCT model FROM requests ORDER BY ts DESC
 ### Bump the version
 
 1. Update `VERSION` in `monitor.py`
-2. Update `<xbar.version>` in `xbar-plugin/claude_tokens.1m.py`
-3. Update `url` and `sha256` in `Formula/claude-meter.rb` after tagging the release
+2. Tag the release: `git tag v0.x.0 && git push origin v0.x.0`
+3. Create a GitHub release from the tag
+4. Update `url` and `sha256` in `Formula/claude-meter.rb`
+5. Push the formula update to `headnoodle/homebrew-tap`
+
+### Test locally
+
+```bash
+pip3 install rumps
+python3 ~/repos/claude-meter/monitor.py
+```
 
 ### Check what's in the database
 
 ```bash
 sqlite3 ~/.claude-meter.db "SELECT day, COUNT(*), ROUND(SUM(cost),2) FROM requests GROUP BY day ORDER BY day"
-```
-
-### Test the xbar output locally
-
-```bash
-python3 ~/repos/claude-meter/monitor.py
-python3 ~/repos/claude-meter/monitor.py --version
-```
-
-### Re-symlink the xbar plugin after moving the repo
-
-```bash
-ln -sf ~/repos/claude-meter/xbar-plugin/claude_tokens.1m.py \
-       ~/Library/Application\ Support/xbar/plugins/claude_tokens.1m.py
 ```
 
 ## DB schema migrations
