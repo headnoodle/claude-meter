@@ -11,13 +11,13 @@ class ClaudeMeter < Formula
   depends_on "python@3.12"
 
   resource "pyobjc-core" do
-    url "https://files.pythonhosted.org/packages/cp312/p/pyobjc_core/pyobjc_core-12.2.2-cp312-cp312-macosx_10_13_universal2.whl"
-    sha256 "122e6ad302a2abf5d4d4adb0156db751600ddf2768441696cba17b31323085e7"
+    url "https://files.pythonhosted.org/packages/source/p/pyobjc_core/pyobjc_core-12.2.2.tar.gz"
+    sha256 "3906452339cd06a3bb07df103c2511d4cb0f7a22d8771c0b802eba15d9a642b6"
   end
 
   resource "pyobjc-framework-Cocoa" do
-    url "https://files.pythonhosted.org/packages/cp312/p/pyobjc_framework_cocoa/pyobjc_framework_cocoa-12.2.2-cp312-cp312-macosx_10_13_universal2.whl"
-    sha256 "e106f395531e67694376b0f1184612cbeea3ec8b9bf56b55ef41d026171d2a2d"
+    url "https://files.pythonhosted.org/packages/source/p/pyobjc_framework_cocoa/pyobjc_framework_cocoa-12.2.2.tar.gz"
+    sha256 "c96c0ef69a71afbbb0e6a7d594b455c5fe47d62e0db376ee7a2b4b828c16ace9"
   end
 
   resource "rumps" do
