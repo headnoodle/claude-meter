@@ -214,46 +214,61 @@ def report(db: sqlite3.Connection) -> dict:
 # Current session
 # ---------------------------------------------------------------------------
 
-def current_session() -> tuple:
-    """Cost and request count for the most recently active JSONL session file."""
+def active_sessions() -> list:
+    """One entry per JSONL file modified today, with total-session and today-only costs."""
     if not CLAUDE_DIR.exists():
-        return 0.0, 0, None
+        return []
 
-    jsonl_files = list(CLAUDE_DIR.rglob("*.jsonl"))
-    if not jsonl_files:
-        return 0.0, 0, None
+    today = date.today().isoformat()
+    results = []
 
-    latest = max(jsonl_files, key=lambda p: p.stat().st_mtime)
+    for jsonl in CLAUDE_DIR.rglob("*.jsonl"):
+        try:
+            if datetime.fromtimestamp(jsonl.stat().st_mtime).date() != date.today():
+                continue
+        except OSError:
+            continue
 
-    # Only treat as "current" if touched in the last 4 hours
-    mtime = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc)
-    if datetime.now(timezone.utc) - mtime > timedelta(hours=4):
-        return 0.0, 0, None
+        total_cost = today_cost = 0.0
+        total_reqs = today_reqs = 0
+        cwd = None
 
-    cost, reqs, cwd = 0.0, 0, None
-    try:
-        with open(latest, encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if "input_tokens" not in line:
-                    continue
-                try:
-                    d = json.loads(line.strip())
-                except json.JSONDecodeError:
-                    continue
-                if d.get("type") != "assistant":
-                    continue
-                msg = d.get("message", {})
-                u = msg.get("usage", {})
-                if not u or "input_tokens" not in u:
-                    continue
-                cost += request_cost(u, msg.get("model", ""))
-                reqs += 1
-                if cwd is None:
-                    cwd = d.get("cwd", "")
-    except OSError:
-        pass
+        try:
+            with open(jsonl, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if "input_tokens" not in line:
+                        continue
+                    try:
+                        d = json.loads(line.strip())
+                    except json.JSONDecodeError:
+                        continue
+                    if d.get("type") != "assistant":
+                        continue
+                    msg = d.get("message", {})
+                    u = msg.get("usage", {})
+                    if not u or "input_tokens" not in u:
+                        continue
+                    cost = request_cost(u, msg.get("model", ""))
+                    total_cost += cost
+                    total_reqs += 1
+                    if d.get("timestamp", "")[:10] == today:
+                        today_cost += cost
+                        today_reqs += 1
+                    if cwd is None:
+                        cwd = d.get("cwd", "")
+        except OSError:
+            continue
 
-    return cost, reqs, cwd
+        if total_cost > 0:
+            results.append({
+                "cwd":        cwd or "",
+                "total_cost": total_cost,
+                "total_reqs": total_reqs,
+                "today_cost": today_cost,
+                "today_reqs": today_reqs,
+            })
+
+    return sorted(results, key=lambda x: x["today_cost"], reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -333,11 +348,13 @@ def main() -> None:
         arrow = "▲" if pct >= 0 else "▼"
         print(f"Trend: {arrow} {abs(pct):.0f}% vs 7d avg ({fmt(r['avg_daily'])}/day)")
 
-    sess_cost, sess_reqs, sess_cwd = current_session()
-    if sess_cost > 0:
-        sess_name = Path(sess_cwd).name if sess_cwd else "?"
+    sessions = [s for s in active_sessions() if s["today_reqs"] > 0]
+    if sessions:
         print("---")
-        print(f"Session: {fmt(sess_cost)} ({sess_reqs} reqs)  [{sess_name}]")
+        print(f"{'Sessions':<26}{'today':>8}  {'session':>8} | font=Menlo size=11")
+        for s in sessions:
+            name = (Path(s["cwd"]).name if s["cwd"] else "?")[:24]
+            print(f"  {name:<24}{fmt(s['today_cost']):>8}  {fmt(s['total_cost']):>8} | font=Menlo size=11")
 
     if r["models_today"]:
         print("---")
