@@ -345,16 +345,29 @@ def budget_bar(current: float, limit: float, width: int = 20) -> str:
 def _short_model(model: str) -> str:
     """Collapse verbose model IDs to a readable short name."""
     m = model.lower()
-    if "fable"  in m: return "Fable 5"
-    if "opus-5" in m: return "Opus 5"
+    if "fable"    in m: return "Fable 5"
+    if "opus-5"   in m: return "Opus 5"
     if "opus-4-8" in m: return "Opus 4.8"
-    if "opus-4" in m: return "Opus 4"
+    if "opus-4"   in m: return "Opus 4"
     if "sonnet-5" in m: return "Sonnet 5"
     if "sonnet-4-6" in m: return "Sonnet 4.6"
     if "sonnet-4" in m: return "Sonnet 4"
     if "haiku-4-5" in m: return "Haiku 4.5"
-    if "haiku" in m: return "Haiku"
-    return model  # unknown — show raw
+    if "haiku"    in m: return "Haiku"
+    return model
+
+
+def _model_color(model: str) -> str:
+    m = model.lower()
+    if "opus"  in m: return "#ff6b6b"
+    if "haiku" in m: return "#51cf66"
+    return "#ffa94d"  # Sonnet / default
+
+
+def model_bar(cost: float, total: float, width: int = 16) -> str:
+    pct   = cost / total if total > 0 else 0
+    filled = round(pct * width)
+    return "█" * filled + "░" * (width - filled)
 
 
 def main() -> None:
@@ -414,8 +427,13 @@ def main() -> None:
     if r["models_today"]:
         print("---")
         print("Models today | color=#868e96")
+        total_today_cost = sum(c for _, c, _ in r["models_today"])
         for model, cost, reqs in r["models_today"]:
-            print(f"  {fmt(cost):>8}  {_short_model(model)}  ({reqs} reqs)")
+            short = _short_model(model)
+            bar   = model_bar(cost, total_today_cost)
+            pct   = int(cost / total_today_cost * 100) if total_today_cost else 0
+            color = _model_color(model)
+            print(f"{short:<12} {bar}  {pct:>3}%  {fmt(cost):>8}  ({reqs} reqs) | font=Menlo size=11 color={color}")
 
     # ── Last 7 days (submenu) ─────────────────────────────────────────────────
     print("---")
@@ -441,8 +459,13 @@ def main() -> None:
     if r["models_all"]:
         print("---")
         print("Models (all time) | color=#868e96")
+        total_all_cost = sum(c for _, c, _ in r["models_all"])
         for model, cost, reqs in r["models_all"]:
-            print(f"-- {fmt(cost):>8}  {_short_model(model)}  ({reqs} reqs)")
+            short = _short_model(model)
+            bar   = model_bar(cost, total_all_cost)
+            pct   = int(cost / total_all_cost * 100) if total_all_cost else 0
+            color = _model_color(model)
+            print(f"-- {short:<12} {bar}  {pct:>3}%  {fmt(cost):>8}  ({reqs} reqs) | font=Menlo size=11 color={color}")
 
     # ── Monthly (submenu) ─────────────────────────────────────────────────────
     if r["month_rows"]:
