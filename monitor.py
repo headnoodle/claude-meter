@@ -12,7 +12,7 @@ import json
 import os
 import sqlite3
 import subprocess
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 CLAUDE_DIR   = Path.home() / ".claude" / "projects"
@@ -123,10 +123,15 @@ def ingest(db: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def report(db: sqlite3.Connection) -> dict:
-    today = date.today().isoformat()
+    today    = date.today().isoformat()
+    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+
     return {
         "today_cost":  db.execute("SELECT COALESCE(SUM(cost),0) FROM requests WHERE day=?", (today,)).fetchone()[0],
         "today_reqs":  db.execute("SELECT COUNT(*) FROM requests WHERE day=?", (today,)).fetchone()[0],
+        "burn_rate":   db.execute(
+            "SELECT COALESCE(SUM(cost),0) FROM requests WHERE ts >= ?", (one_hour_ago,)
+        ).fetchone()[0],
         "all_cost":    db.execute("SELECT COALESCE(SUM(cost),0) FROM requests").fetchone()[0],
         "all_reqs":    db.execute("SELECT COUNT(*) FROM requests").fetchone()[0],
         "since":       db.execute("SELECT MIN(day) FROM requests").fetchone()[0],
@@ -181,12 +186,15 @@ def main() -> None:
     check_budget(db, r["today_cost"])
     db.close()
 
-    over_budget = DAILY_BUDGET > 0 and r["today_cost"] >= DAILY_BUDGET
-    title_suffix = " ⚠️" if over_budget else ""
-    print(f"🤖 {fmt(r['today_cost'])} today{title_suffix}")
+    over_budget  = DAILY_BUDGET > 0 and r["today_cost"] >= DAILY_BUDGET
+    burn         = r["burn_rate"]
+    burn_str     = f" · {fmt(burn)}/hr" if burn >= 0.01 else ""
+    alert_str    = " ⚠️" if over_budget else ""
+    print(f"🤖 {fmt(r['today_cost'])} today{burn_str}{alert_str}")
     print("---")
     budget_line = f"  (budget: {fmt(DAILY_BUDGET)})" if DAILY_BUDGET > 0 else ""
     print(f"Today: {fmt(r['today_cost'])} ({r['today_reqs']} requests){budget_line}")
+    print(f"Burn rate: {fmt(burn)}/hr  (rolling 1h)")
     print("---")
     print("Last 7 days")
     for day, cost in r["by_day"]:
