@@ -76,6 +76,19 @@ try:
             NSApplication.sharedApplication().stopModal()
             return True
 
+    class _AboutHandler(NSObject):
+        """Close button target for the About panel."""
+        def close_(self, sender):
+            NSApplication.sharedApplication().stopModal()
+
+    class _LinkHandler(NSObject):
+        """GitHub link button target for the About panel."""
+        def click_(self, sender):
+            from AppKit import NSURL
+            NSWorkspace.sharedWorkspace().openURL_(
+                NSURL.URLWithString_("https://github.com/headnoodle/claude-meter")
+            )
+
     class _NumericDelegate(NSObject):
         """NSTextFieldDelegate that strips non-numeric characters after each change."""
         _allow_floats = False
@@ -102,7 +115,12 @@ def _show_about_panel() -> None:
     except ImportError:
         _BEZEL = 1
 
-    W, H = 320, 280
+    try:
+        from AppKit import NSTextAlignmentCenter as _CENTER
+    except ImportError:
+        _CENTER = 2
+
+    W, H = 360, 430
     win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         ((0, 0), (W, H)), 3, 2, False
     )
@@ -116,40 +134,40 @@ def _show_about_panel() -> None:
     icon_name = cfg.get("icon", "brain")
     sym = NSImage.imageWithSystemSymbolName_accessibilityDescription_(icon_name, None)
     if sym:
-        iv = NSImageView.alloc().initWithFrame_(((W // 2 - 30, 210), (60, 60)))
+        iv = NSImageView.alloc().initWithFrame_(((W // 2 - 80, 256), (160, 160)))
         iv.setImage_(sym)
-        iv.setImageScaling_(1)  # NSImageScaleAxesIndependently → fills frame
+        iv.setImageScaling_(3)  # NSImageScaleProportionallyUpOrDown
         cv.addSubview_(iv)
 
     # ── Text fields ──────────────────────────────────────────────────
-    def lbl(text, y, size=13, bold=False, secondary=False, center=True):
-        tf = NSTextField.alloc().initWithFrame_(((0, y), (W, size + 6)))
+    PAD = 20
+    def lbl(text, y, size=13, bold=False, secondary=False):
+        tf = NSTextField.alloc().initWithFrame_(((PAD, y), (W - PAD * 2, size + 12)))
         tf.setStringValue_(text)
         tf.setBezeled_(False)
         tf.setDrawsBackground_(False)
         tf.setEditable_(False)
         tf.setSelectable_(False)
         tf.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
+        tf.setAlignment_(_CENTER)
         if secondary:
             tf.setTextColor_(NSColor.secondaryLabelColor())
-        if center:
-            tf.setAlignment_(2)  # NSTextAlignmentCenter
         cv.addSubview_(tf)
 
-    lbl("claude-meter", 175, size=22, bold=True)
-    lbl(f"Version {VERSION}", 152, size=13, secondary=True)
-    lbl("Tracks Claude Code API spend in real time.", 122, size=12, secondary=True)
-    lbl("Reads local transcripts — no API key required.", 104, size=12, secondary=True)
+    lbl("claude-meter", 218, size=22, bold=True)
+    lbl(f"Version {VERSION}", 194, size=13, secondary=True)
+    lbl("Tracks Claude Code API spend in real time.", 168, size=12, secondary=True)
+    lbl("Reads local transcripts — no API key required.", 148, size=12, secondary=True)
 
     # ── Separator ────────────────────────────────────────────────────
-    box = NSBox.alloc().initWithFrame_(((20, 92), (W - 40, 1)))
+    box = NSBox.alloc().initWithFrame_(((PAD, 134), (W - PAD * 2, 1)))
     box.setBoxType_(2)
     cv.addSubview_(box)
 
-    lbl("MIT License  ·  © headnoodle", 72, size=11, secondary=True)
+    lbl("MIT License  ·  © headnoodle", 98, size=11, secondary=True)
 
     # ── GitHub link button ───────────────────────────────────────────
-    link = NSButton.alloc().initWithFrame_(((W // 2 - 120, 46), (240, 20)))
+    link = NSButton.alloc().initWithFrame_(((W // 2 - 130, 64), (260, 22)))
     link.setTitle_("github.com/headnoodle/claude-meter")
     link.setBordered_(False)
     link.setBezelStyle_(0)
@@ -163,23 +181,12 @@ def _show_about_panel() -> None:
         )
     )
 
-    class _LinkHandler(NSObject):
-        def click_(self, sender):
-            from AppKit import NSURL
-            NSWorkspace.sharedWorkspace().openURL_(
-                NSURL.URLWithString_("https://github.com/headnoodle/claude-meter")
-            )
-
     _lh = _LinkHandler.alloc().init()
     link.setTarget_(_lh)
     link.setAction_("click:")
     cv.addSubview_(link)
 
     # ── Close button ─────────────────────────────────────────────────
-    class _AboutHandler(NSObject):
-        def close_(self, sender):
-            NSApplication.sharedApplication().stopModal()
-
     sh = _AboutHandler.alloc().init()
     sh._link_handler = _lh  # prevent GC
 
