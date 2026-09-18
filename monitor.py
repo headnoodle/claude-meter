@@ -448,7 +448,7 @@ def _show_settings_panel(app_instance) -> None:
         save_config(cfg)
         app_instance._refresh(None)
 
-VERSION        = "0.4.8"
+VERSION        = "0.4.9"
 CLAUDE_DIR     = Path.home() / ".claude" / "projects"
 DB_PATH        = Path.home() / ".claude-meter.db"
 CONFIG_PATH    = Path.home() / ".claude-meter.conf"
@@ -593,11 +593,18 @@ def ingest(db: sqlite3.Connection) -> None:
                         continue
 
                     db.execute(
-                        """INSERT OR IGNORE INTO requests
+                        """INSERT INTO requests
                            (request_id, ts, day, model, cost, thinking_cost,
                             cache_read_tokens, cache_total_tokens, cache_savings,
                             git_branch, cwd)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(request_id) DO UPDATE SET
+                             cost               = excluded.cost,
+                             thinking_cost      = excluded.thinking_cost,
+                             cache_read_tokens  = excluded.cache_read_tokens,
+                             cache_total_tokens = excluded.cache_total_tokens,
+                             cache_savings      = excluded.cache_savings
+                           WHERE excluded.cost > requests.cost""",
                         (rid, ts, day, model, cost, think_cost,
                          cr_tok, ct_tok, c_savings, branch, cwd),
                     )
