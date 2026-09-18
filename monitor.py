@@ -448,7 +448,7 @@ def _show_settings_panel(app_instance) -> None:
         save_config(cfg)
         app_instance._refresh(None)
 
-VERSION        = "0.4.9"
+VERSION        = "0.4.10"
 CLAUDE_DIR     = Path.home() / ".claude" / "projects"
 DB_PATH        = Path.home() / ".claude-meter.db"
 CONFIG_PATH    = Path.home() / ".claude-meter.conf"
@@ -527,6 +527,12 @@ def open_db() -> sqlite3.Connection:
             PRIMARY KEY (day, threshold)
         )
     """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS ingested_files (
+            path  TEXT PRIMARY KEY,
+            mtime REAL NOT NULL
+        )
+    """)
     db.commit()
     return db
 
@@ -555,11 +561,18 @@ def ingest(db: sqlite3.Connection) -> None:
     if not CLAUDE_DIR.exists():
         return
 
-    needs_cwd    = {row[0] for row in db.execute("SELECT request_id FROM requests WHERE cwd IS NULL OR cwd = ''")}
-    needs_branch = {row[0] for row in db.execute("SELECT request_id FROM requests WHERE git_branch IS NULL OR git_branch = ''")}
-    needs_cache  = {row[0] for row in db.execute("SELECT request_id FROM requests WHERE cache_total_tokens = 0")}
+    known_mtimes = {row[0]: row[1] for row in db.execute("SELECT path, mtime FROM ingested_files")}
 
     for jsonl in CLAUDE_DIR.rglob("*.jsonl"):
+        path_str = str(jsonl)
+        try:
+            current_mtime = jsonl.stat().st_mtime
+        except OSError:
+            continue
+
+        if path_str in known_mtimes and current_mtime <= known_mtimes[path_str]:
+            continue  # file unchanged since last ingest — skip
+
         try:
             with open(jsonl, encoding="utf-8", errors="ignore") as f:
                 for line in f:
@@ -609,21 +622,16 @@ def ingest(db: sqlite3.Connection) -> None:
                          cr_tok, ct_tok, c_savings, branch, cwd),
                     )
 
-                    if rid in needs_cwd and cwd:
-                        db.execute("UPDATE requests SET cwd=? WHERE request_id=?", (cwd, rid))
-                        needs_cwd.discard(rid)
-                    if rid in needs_branch and branch:
-                        db.execute("UPDATE requests SET git_branch=? WHERE request_id=?", (branch, rid))
-                        needs_branch.discard(rid)
-                    if rid in needs_cache and ct_tok > 0:
-                        db.execute(
-                            "UPDATE requests SET cache_read_tokens=?, cache_total_tokens=?, cache_savings=? WHERE request_id=?",
-                            (cr_tok, ct_tok, c_savings, rid),
-                        )
-                        needs_cache.discard(rid)
+                    if cwd:
+                        db.execute("UPDATE requests SET cwd=? WHERE request_id=? AND (cwd IS NULL OR cwd='')", (cwd, rid))
+                    if branch:
+                        db.execute("UPDATE requests SET git_branch=? WHERE request_id=? AND (git_branch IS NULL OR git_branch='')", (branch, rid))
 
         except OSError:
             pass
+
+        db.execute("INSERT OR REPLACE INTO ingested_files (path, mtime) VALUES (?,?)",
+                   (path_str, current_mtime))
 
     db.commit()
 
